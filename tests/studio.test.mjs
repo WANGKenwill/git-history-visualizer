@@ -30,6 +30,49 @@ async function studioFixture(t) {
   return {...f,page,select,generate};
 }
 
+test('file URLs show startup guidance, disable controls and never load the Studio module',{timeout:20000},async(t)=>{
+  const browser=await chromium.launch({headless:true});t.after(()=>browser.close());
+  const page=await browser.newPage(),requests=[];page.on('request',request=>requests.push(request.url()));
+  await page.goto(new URL('../studio.html',import.meta.url).href);
+  assert.match(await page.locator('#status').textContent(),/npm run studio.*HTTP/);
+  assert.equal(await page.locator('#status a').getAttribute('href'),'http://127.0.0.1:4173/');
+  assert.equal(await page.locator('input:enabled, button:enabled, select:enabled').count(),0);
+  assert(!requests.some(url=>url.endsWith('/src/studio.js')));
+});
+
+test('typed local paths preserve Unicode and spaces, clear remote URLs and omit tokens',{timeout:20000},async(t)=>{
+  const f=await studioFixture(t),repo=join(f.dir,'中文 仓库');
+  execFileSync('git',['clone',f.repo,repo],{stdio:'pipe'});
+  await f.page.goto(f.origin);
+  await f.page.getByText('远程 GitLab（可选，较慢）',{exact:true}).click();
+  await f.page.locator('#remote-source').fill('https://gitlab.example.com/old');await f.page.locator('#token').fill('private-token');
+  await f.page.locator('#source').fill(`  ${repo}  `);
+  assert.equal(await f.page.locator('#remote-source').inputValue(),'');
+  const submitted=f.page.waitForRequest(request=>request.url().endsWith('/api/analyze'));
+  const result=await f.generate(),body=(await submitted).postDataJSON();
+  assert.equal(body.source,repo);assert.equal(body.token,'');assert.equal(body.branch,'main');assert.equal(result.totalChurn,1);
+  const remote='https://gitlab.example.com/new';
+  await f.page.locator('#remote-source').fill(remote);
+  await f.page.route('**/api/analyze',route=>{const body=route.request().postDataJSON();assert.equal(body.source,remote);assert.equal(body.token,'private-token');return route.fulfill({json:{ok:true,manifest:result}});});
+  await f.generate();
+});
+
+test('picker cancellation and failure retain manually entered paths',{timeout:20000},async(t)=>{
+  const f=await studioFixture(t);await f.page.goto(f.origin);
+  await f.page.locator('#source').fill(f.repo);
+  for(const result of [{ok:false,cancelled:true},{ok:false,error:'弹窗不可用'}]) {
+    await f.page.route('**/api/pick-local',route=>route.fulfill({json:result}));
+    await f.page.locator('#pick-local').click();await f.page.waitForFunction(()=>!document.querySelector('#pick-local').disabled);
+    assert.equal(await f.page.locator('#source').inputValue(),f.repo);
+    if(result.error)assert.match(await f.page.locator('#status').textContent(),/弹窗不可用/);
+  }
+  const response=f.page.waitForResponse(response=>response.url().endsWith('/api/analyze'));
+  await f.page.locator('#source').fill(join(f.dir,'不存在的仓库'));await f.page.locator('#analyze').click();
+  assert.equal((await response).status(),400);
+  await f.page.waitForFunction(()=>!document.querySelector('#analyze').disabled);
+  assert.match(await f.page.locator('#status').textContent(),/生成失败.*不是 Git 仓库/);
+});
+
 test('switching repositories preserves their saved account associations',{timeout:20000},async(t)=>{
   const f=await studioFixture(t);
   f.git('config','user.name','B');f.git('config','user.email','b@test');
@@ -132,4 +175,69 @@ test('merge details remain clickable while playing and update when arrivals chan
   assert.match(await f.page.locator('#author-detail').textContent(),/改动 200/);
   await seek(3);assert.match(await summary.textContent(),/1 个合并组/);
   await seek(1);assert.equal(await f.page.locator('#author-detail details:visible').count(),0);
+});
+
+test('play restarts at the end and continues from an intermediate pause',{timeout:20000},async(t)=>{
+  const f=await studioFixture(t),manifest=await f.analyze({source:f.repo});manifest.duration=.5;
+  await f.page.route('**/data/manifest.js',route=>route.fulfill({contentType:'text/javascript',body:`window.__GIT_MANIFEST__=${JSON.stringify(manifest)};`}));
+  await f.page.goto(f.origin);
+  const play=()=>f.page.locator('#play').evaluate(el=>{el.click();return {time:Number(document.querySelector('#scrub').value),label:el.textContent};});
+  await play();
+  await f.page.waitForFunction(()=>Number(document.querySelector('#scrub').value)===.5&&document.querySelector('#play').textContent==='播放');
+  assert.deepEqual(await play(),{time:0,label:'暂停'});
+  await f.page.waitForFunction(()=>Number(document.querySelector('#scrub').value)>.1);
+  const paused=await play();assert.equal(paused.label,'播放');assert(paused.time>.1&&paused.time<.5);
+  assert.deepEqual(await play(),{time:paused.time,label:'暂停'});
+  await f.page.locator('#scrub').evaluate(el=>{el.value=.5;el.dispatchEvent(new Event('input',{bubbles:true}));});
+  assert.deepEqual(await play(),{time:0,label:'暂停'});
+});
+
+test('Studio decodes split progress messages and only offers downloads after completion',{timeout:20000},async(t)=>{
+  const f=await studioFixture(t);await f.analyze({source:f.repo});await f.page.goto(f.origin);
+  await f.page.evaluate(()=>{
+    const realFetch=window.fetch;
+    window.fetch=(url,options)=>{
+      if(url!=='/api/export')return realFetch(url,options);
+      window.exportAccept=options.headers.accept;
+      return Promise.resolve(new Response(new ReadableStream({start(controller){window.exportController=controller;}}),{headers:{'content-type':'application/x-ndjson'}}));
+    };
+  });
+  const enqueue=bytes=>f.page.evaluate(bytes=>window.exportController.enqueue(Uint8Array.from(bytes)),Array.from(bytes));
+  await f.page.locator('#export').click();await f.page.waitForFunction(()=>window.exportController);
+  assert.equal(await f.page.evaluate(()=>window.exportAccept),'application/x-ndjson');
+  await enqueue(Buffer.from('{"type":"start"}\n{"type":"progress","frame":'));
+  assert.equal(await f.page.locator('#status').textContent(),'准备导出…');
+  await enqueue(Buffer.from('1,"total":90}\n'));
+  await f.page.waitForFunction(()=>document.querySelector('#status').textContent.includes('1/90'));
+  assert.match(await f.page.locator('#status').textContent(),/1%/);assert(await f.page.locator('#export').isDisabled());
+  await enqueue(Buffer.from('{"type":"progress","frame":90,"total":90}\n'));
+  await f.page.waitForFunction(()=>document.querySelector('#status').textContent.includes('正在完成编码'));
+  assert.equal(await f.page.locator('#status a').count(),0);
+  const complete=Buffer.from(JSON.stringify({type:'complete',file:'/exports/测试.mp4'})),split=complete.indexOf(Buffer.from('测'))+1;
+  await enqueue(complete.subarray(0,split));await enqueue(complete.subarray(split));
+  await f.page.evaluate(()=>window.exportController.close());
+  await f.page.locator('#status a').waitFor();assert.equal(await f.page.locator('#status a').getAttribute('href'),'/exports/测试.mp4');
+  await f.page.waitForFunction(()=>!document.querySelector('#export').disabled);
+});
+
+test('Studio restores export controls after streamed errors, premature EOF and network failures',{timeout:20000},async(t)=>{
+  const f=await studioFixture(t);await f.analyze({source:f.repo});await f.page.goto(f.origin);
+  for(const kind of ['error','eof','network']) {
+    await f.page.evaluate(()=>{
+      window.exportController=null;
+      window.fetch=()=>Promise.resolve(new Response(new ReadableStream({start(controller){window.exportController=controller;}}),{headers:{'content-type':'application/x-ndjson'}}));
+    });
+    await f.page.locator('#export').click();await f.page.waitForFunction(()=>window.exportController);
+    await f.page.evaluate(kind=>{
+      const c=window.exportController;
+      c.enqueue(new TextEncoder().encode('{"type":"start"}\n'));
+      if(kind==='error'){const bytes=new TextEncoder().encode('{"type":"error","error":"本地编码失败"}\n');const split=new TextEncoder().encode('{"type":"error","error":"').length+1;c.enqueue(bytes.slice(0,split));c.enqueue(bytes.slice(split));c.close();}
+      else if(kind==='eof')c.close();
+      else c.error(new Error('连接断开'));
+    },kind);
+    await f.page.waitForFunction(()=>!document.querySelector('#export').disabled);
+    const status=await f.page.locator('#status').textContent();assert.match(status,/导出失败/);
+    assert.match(status,kind==='error'?/本地编码失败/:kind==='eof'?/未收到完成结果/:/连接断开/);
+    assert.equal(await f.page.locator('#status a').count(),0);
+  }
 });

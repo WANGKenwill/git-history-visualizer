@@ -100,24 +100,26 @@ export function analyzeHistory({ repo, branch = "main", excludes = DEFAULT_EXCLU
   duration = Math.min(180, Math.max(15, Number(duration) || 60));
   maxAuthors = Math.min(32, Math.max(1, Math.floor(Number(maxAuthors) || 16)));
   const head = git(repo, ["rev-parse", `${branch}^{commit}`]);
-  const allCommits = parseLog(repo, head, false);
-  const regular = allCommits.filter((commit) => commit.parents.length < 2);
   const rulesKey = JSON.stringify(excludes);
   const pathExcludes = excludes.map((pattern) => new RegExp(`^${pattern
     .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
     .replace(/\*\*\/|\*\*|\*/g, (wildcard) => wildcard === "**/" ? "(?:.*/)?" : wildcard === "**" ? ".*" : "[^/]*")}$`));
   const compatible = previousManifest?.version === 2 && previousManifest.project.repo === repo && previousManifest.project.branch === branch && JSON.stringify(previousManifest.rules.excludes) === rulesKey;
-  const canIncrement = compatible && previousManifest.rules.exclusionMatching === "path-glob" && previousManifest.rules.numstatFormat === "nul-v1" && allCommits.some((commit) => commit.sha === previousManifest.project.head);
+  const currentFormat = compatible && previousManifest.rules.exclusionMatching === "path-glob" && previousManifest.rules.numstatFormat === "nul-v1";
+  const cacheHit = currentFormat && head === previousManifest.project.head;
+  const allCommits = cacheHit ? [] : parseLog(repo, head, false);
+  const regular = allCommits.filter((commit) => commit.parents.length < 2);
+  const canIncrement = currentFormat && (cacheHit || allCommits.some((commit) => commit.sha === previousManifest.project.head));
   const previous = new Map(canIncrement ? previousManifest.commits.map((commit) => [commit.sha, commit]) : []);
   const newShas = regular.filter((commit) => !previous.has(commit.sha)).map((commit) => commit.sha);
   const stats = newShas.length ? parseNumstatLog(repo, ["--no-merges", head, ...(canIncrement ? [`^${previousManifest.project.head}`] : [])], pathExcludes) : new Map();
-  const commits = regular.map((commit) => ({
+  const commits = cacheHit ? structuredClone(previousManifest.commits) : regular.map((commit) => ({
     ...commit, authorId: commit.authorEmail.toLowerCase(),
     ...(previous.get(commit.sha) || stats.get(commit.sha) || parseNumstat(repo, commit.sha, commit.parents[0], pathExcludes)),
     groupIds: [],
   })).sort((a, b) => Date.parse(a.authoredAt) - Date.parse(b.authoredAt) || Date.parse(a.committedAt) - Date.parse(b.committedAt) || a.sha.localeCompare(b.sha));
   const bySha = new Map(commits.map((commit) => [commit.sha, commit]));
-  const groups = allCommits.filter((commit) => commit.parents.length > 1).map((merge) => {
+  const groups = cacheHit ? structuredClone(previousManifest.groups) : allCommits.filter((commit) => commit.parents.length > 1).map((merge) => {
     const shas = git(repo, ["rev-list", "--no-merges", ...merge.parents.slice(1), `^${merge.parents[0]}`]).split("\n").filter((sha) => bySha.has(sha));
     for (const sha of shas) bySha.get(sha).groupIds.push(merge.sha);
     return { id: merge.sha, kind: "merge-group", title: merge.subject, integratedAt: merge.committedAt, commitShas: shas };
@@ -141,7 +143,7 @@ export function analyzeHistory({ repo, branch = "main", excludes = DEFAULT_EXCLU
     authors, groups, commits: normalizedTimeline(commits, duration), duration,
     totalChurn: authors.reduce((sum, author) => sum + author.churn, 0),
     totalLines: treeStats ? treeStats.additions : previousManifest.totalLines,
-    analysis: { cacheHit: Boolean(canIncrement && head === previousManifest.project.head), incremental: Boolean(canIncrement && head !== previousManifest.project.head), analyzedEvents: newShas.length, retentionCacheHit: retentionResult.cacheHit, retentionMs: retentionResult.elapsedMs },
+    analysis: { cacheHit: Boolean(cacheHit), incremental: Boolean(canIncrement && !cacheHit), analyzedEvents: newShas.length, retentionCacheHit: retentionResult.cacheHit, retentionMs: retentionResult.elapsedMs },
   };
   manifest.layout = Object.fromEntries(prepareHistory(manifest).nodes.map(n=>[n.id,{x:n.x,y:n.y}]));
   return manifest;

@@ -13,6 +13,7 @@ test('export page matches interactive Canvas pixels and blocks external requests
   const manifest = JSON.parse(readFileSync(new URL('../data/manifest.json', import.meta.url)));
   const assets = new Map([
     ['/studio.html', ['text/html', readFileSync(new URL('../studio.html', import.meta.url))]],
+    ['/src/studio.js', ['text/javascript', readFileSync(new URL('../src/studio.js', import.meta.url))]],
     ['/src/visualizer.js', ['text/javascript', readFileSync(new URL('../src/visualizer.js', import.meta.url))]],
     ['/src/motion.js', ['text/javascript', readFileSync(new URL('../src/motion.js', import.meta.url))]],
     ['/src/accounts.js', ['text/javascript', readFileSync(new URL('../src/accounts.js', import.meta.url))]],

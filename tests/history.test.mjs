@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import childProcess, { execFileSync } from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -88,6 +89,37 @@ test('cached statistics from the old substring filter are rebuilt',()=>{
     assert.equal(rebuilt.analysis.cacheHit,false);
     assert.equal(analyzeHistory({repo:f.repo,previousManifest:rebuilt}).analysis.cacheHit,true);
   }finally{f.cleanup();}
+});
+
+test('same HEAD cache skips history queries, updates presentation and never mutates its input',(t)=>{
+  const f=fixture();
+  try {
+    f.commit('初始提交','2020-01-01T00:00:00Z','one\n');
+    f.git('checkout','-b','feature');f.git('config','user.name','B');f.git('config','user.email','b@test');
+    f.commit('功能提交','2020-01-02T00:00:00Z','two\n','b.txt');f.git('checkout','main');f.git('merge','--no-ff','feature','-m','合并功能');
+    const original=analyzeHistory({repo:f.repo}), unchanged=structuredClone(original), calls=[];
+    const real=childProcess.execFileSync;
+    t.mock.method(childProcess,'execFileSync',(command,args,options)=>{if(command==='git')calls.push(args);return real(command,args,options);});
+    syncBuiltinESMExports();
+    try {
+      const linked=analyzeHistory({repo:f.repo,previousManifest:original,duration:15,timeZone:'UTC',maxAuthors:1,accountLinks:{'b@test':'a@test'},projectName:'缓存展示'});
+      assert(linked.analysis.cacheHit);assert(linked.analysis.retentionCacheHit);assert.equal(linked.analysis.analyzedEvents,0);
+      assert.deepEqual(calls,[['-C',f.repo,'rev-parse','main^{commit}']]);
+      assert.equal(linked.project.name,'缓存展示');assert.equal(linked.duration,15);assert.equal(linked.settings.timeZone,'UTC');assert.equal(linked.settings.maxAuthors,1);
+      assert.deepEqual(linked.groups,original.groups);assert.equal(linked.totalLines,original.totalLines);assert.equal(linked.totalChurn,original.totalChurn);
+      assert.deepEqual(linked.commits.map(({at,...c})=>c),original.commits.map(({at,...c})=>c));
+      assert.notEqual(linked.commits[1].at,original.commits[1].at);assert.equal(prepareHistory(linked).authors.length,1);
+      assert.deepEqual(original,unchanged);
+      for(const version of [undefined,0]) {
+        const old=structuredClone(original);if(version===undefined)delete old.retention;else old.retention.version=version;
+        const before=structuredClone(old);calls.length=0;
+        const rebuilt=analyzeHistory({repo:f.repo,previousManifest:old});
+        assert(rebuilt.analysis.cacheHit);assert(!rebuilt.analysis.retentionCacheHit);
+        assert(!calls.some(args=>args.includes('log')||args.includes('rev-list')));
+        assert(calls.some(args=>args.includes('blame')));assert.deepEqual(rebuilt.retention,original.retention);assert.deepEqual(old,before);
+      }
+    } finally {t.mock.restoreAll();syncBuiltinESMExports();}
+  } finally {f.cleanup();}
 });
 
 test('clock quadrants, half-hours, seconds and time zones',()=>{
@@ -196,7 +228,7 @@ test('account linking, unlinking, primary changes and aggregated identities',asy
   const grouped=groupedAuthors(m).authors;assert.equal(grouped.length,1);assert.equal(grouped[0].name,m.authors[1].name);
   assert.equal(grouped[0].churn,6);assert.equal(grouped[0].memberIds.length,3);
   const p=prepareHistory(m);assert.equal(p.nodes.length,1);assert.equal(p.particles.length,1);
-  assert.equal(p.particles[0].authorId,b);assert.equal(p.particles[0].color,m.authors[1].color);
+  assert.equal(p.particles[0].authorId,b);assert.equal(p.particles[0].color,p.nodes[0].color);
   assert.equal(historyState(m,15).churn,6);assert.equal(historyState(m,15).nodes[0].commitCount,3);
   assert.deepEqual(m.commits.map(c=>c.authorId),[a,b,c]);
   links=changeAccount(m.authors,links,c,'unlink');assert.deepEqual(links,{[a]:b});
@@ -236,4 +268,61 @@ test('particles meet the moving author edge at absorption, including overlapping
     const radius=Math.max(1,node.radius*Math.sqrt(node.visualChurn/node.finalChurn));
     assert(Math.abs(Math.hypot(p.path.ex-node.x,p.path.ey-node.y)-radius)<1e-7);
   }
+});
+
+
+test('presentation colors are stable, follow primary identities and leave manifests untouched',()=>{
+  const m=sample(16), original=structuredClone(m);
+  const scene=prepareHistory(m), reversed=prepareHistory({...m,authors:[...m.authors].reverse()});
+  for(const node of scene.nodes) {
+    assert.equal(node.color,reversed.nodes.find(n=>n.id===node.id).color);
+    assert.match(node.color,/^#[0-9A-F]{6}$/);
+  }
+  assert.deepEqual(m,original);
+  const [main,alias]=m.authors.map(a=>a.id);
+  const linked=prepareHistory({...m,settings:{...m.settings,accountLinks:{[alias]:main}}});
+  assert.equal(linked.nodes.find(n=>n.id===main).color,scene.nodes.find(n=>n.id===main).color);
+  for(const particle of linked.particles) assert.equal(particle.color,linked.nodes.find(n=>n.id===particle.authorId).color);
+  const limited=prepareHistory({...m,settings:{...m.settings,maxAuthors:1}});
+  assert.equal(limited.nodes.find(n=>n.id==='__other__').color,'#91A0B2');
+  for(const particle of limited.particles) assert.equal(particle.color,limited.nodes.find(n=>n.id===particle.authorId).color);
+  assert.deepEqual(m,original);
+});
+
+test('full single-line author names and numbers share two fixed size tiers',()=>{
+  const m=sample(2);
+  m.authors[0].name='Alexandra Victoria Longlastname';
+  m.authors[1].name='中文开发者完整姓名👩‍💻';
+  const labels=[], properties={};
+  const ctx=new Proxy(properties,{
+    get(target,key){
+      if(key==='measureText')return text=>({width:[...text].length*parseFloat(target.font.match(/[\d.]+(?=px)/)[0])*.6});
+      if(key==='createRadialGradient')return ()=>({addColorStop(){}});
+      if(key==='fillText')return (text,x,y)=>labels.push({text,x,y,font:target.font,color:target.fillStyle});
+      return ()=>{};
+    },
+    set(target,key,value){target[key]=value;return true;}
+  });
+  const nodes=drawHistory(ctx,m,m.duration);
+  for(const node of nodes){
+    const largeLabel=node.radius*Math.sqrt(node.visualChurn/Math.max(1,node.finalChurn))>=60;
+    const name=labels.filter(l=>l.text===node.name);
+    assert.equal(name.length,1);
+    assert.equal(name[0].text,node.name);
+    assert.equal(name[0].color,'#E7EDF3');
+    assert.equal(name[0].font,`600 ${largeLabel ? 24 : 16}px system-ui`);
+    const numeric=labels.find(l=>l.x===node.x && l.y===node.y+20);
+    assert.equal(parseFloat(numeric.font),largeLabel ? 18 : 12);
+    assert.equal(numeric.color,name[0].color);
+    assert(name.every(l=>!l.text.includes('…')));
+    assert.equal(name[0].x,node.x);
+    assert.equal(name[0].y,node.y-4);
+  }
+  const growing=sample(1);growing.authors[0].name='Ada';labels.length=0;
+  drawHistory(ctx,growing,2.3);
+  const early=labels.find(l=>l.text==='Ada').font;
+  labels.length=0;drawHistory(ctx,growing,growing.duration);
+  const late=labels.find(l=>l.text==='Ada').font;
+  assert.equal(early,'600 16px system-ui');
+  assert.equal(late,'600 24px system-ui');
 });

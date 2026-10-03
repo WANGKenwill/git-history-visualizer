@@ -4,6 +4,9 @@ export const WIDTH = 1920;
 export const HEIGHT = 1080;
 const CX = 960, CY = 555, RX = 735, RY = 355;
 const FLIGHT = 1.65;
+const PALETTE = ['#709CD0', '#60C4D8', '#68C7AC', '#8BAED4', '#E4B568', '#E69383', '#A59BDF', '#91CDB9', '#D9BB80', '#BEA0DD', '#A2C68C', '#DB9DBB', '#7EA9E3', '#ECA38A', '#72C7C5', '#B3A2EA', '#E6B16F', '#D58EAE', '#84BEA1', '#80BBD5', '#DDBD77', '#ACBDE1', '#C5AFDD', '#B4C998'];
+const INK = '#090F18', TEXT = '#E7EDF3', MUTED = '#A2B1C0', ACCENT = '#A3D3D3';
+const MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace';
 const prepared = new WeakMap();
 const clocks = new WeakMap();
 const clamp = (v) => Math.max(0, Math.min(1, v));
@@ -52,7 +55,7 @@ function prepareClock(manifest) {
     return { firstEnd, lastStart, skippedDays, firstDuration: firstEnd - start.timestamp,
       retainedDuration: firstEnd - start.timestamp + end.timestamp - lastStart };
   });
-  const result = { points, spans, formatter, label: new Intl.DateTimeFormat('zh-CN', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }) };
+  const result = { points, spans, formatter, label: new Intl.DateTimeFormat('zh-CN', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }) };
   clocks.set(manifest, result); return result;
 }
 
@@ -116,11 +119,12 @@ export function particleRadius(churn) {
 export function prepareHistory(manifest) {
   if (prepared.has(manifest)) return prepared.get(manifest);
   const identities = groupedAuthors(manifest);
+  identities.authors = identities.authors.map(a => ({ ...a, color: PALETTE[hash(a.id) % PALETTE.length] }));
   const ranked = [...identities.authors].sort((a, b) => b.churn - a.churn || a.id.localeCompare(b.id));
   const visible = ranked.slice(0, manifest.settings?.maxAuthors || 16).map((a) => ({ ...a }));
   const hidden = ranked.slice(visible.length);
   const selected = new Set(visible.map((a) => a.id));
-  if (hidden.length) visible.push({ id: '__other__', name: `其他 · ${hidden.length} 人`, color: '#a6b8cc', churn: hidden.reduce((sum, a) => sum + a.churn, 0), hiddenCount: hidden.length, retainedLines: hidden.reduce((sum,a)=>sum+(a.retainedLines||0),0) });
+  if (hidden.length) visible.push({ id: '__other__', name: `其他 · ${hidden.length} 人`, color: '#91A0B2', churn: hidden.reduce((sum, a) => sum + a.churn, 0), hiddenCount: hidden.length, retainedLines: hidden.reduce((sum,a)=>sum+(a.retainedLines||0),0) });
   const nodes = pack(visible, manifest.layout || {});
   const nodeById = new Map(nodes.map((a) => [a.id, a]));
   const formatter = clockFormatter(manifest.settings?.timeZone || 'Asia/Shanghai');
@@ -133,7 +137,7 @@ export function prepareHistory(manifest) {
     const key = `${identity}:${commit.authoredAt}:${commit.at}`;
     let particle = particles.get(key);
     if (!particle) {
-      particle = { id: commit.sha, authorId, color: identities.authors.find((a) => a.id === identity)?.color || '#a6b8cc', at: commit.at, latestAt: commit.at, angle: Math.PI / 2 + hour * Math.PI / 12, churn: 0, commits: [] };
+      particle = { id: commit.sha, authorId, color: nodeById.get(authorId).color, at: commit.at, latestAt: commit.at, angle: Math.PI / 2 + hour * Math.PI / 12, churn: 0, commits: [] };
       particles.set(key, particle);
     }
     particle.latestAt = Math.max(particle.latestAt, commit.at);
@@ -201,34 +205,36 @@ function fitText(ctx, text, width) {
   return result === text ? result : `${result.slice(0,-1)}…`;
 }
 
+function ballRadius(node) {
+  return Math.max(1,node.radius*Math.sqrt(node.visualChurn/Math.max(1,node.finalChurn)));
+}
+// Reserve the light text colour: even the core highlight stays below this luminance.
+function ballTone(channels,luminance) {
+  const linear=channels.map(value=>{const c=value/255;return c<=.04045 ? c/12.92 : ((c+.055)/1.055)**2.4;});
+  const current=linear[0]*.2126+linear[1]*.7152+linear[2]*.0722;
+  const scale=Math.min(1,luminance/Math.max(current,.001));
+  return linear.map(value=>{const c=value*scale;return Math.floor(255*(c<=.0031308 ? c*12.92 : 1.055*c**(1/2.4)-.055));}).join(',');
+}
 export function drawHistory(ctx, manifest, time) {
   const state = historyState(manifest, time);
   const clock = clockState(manifest, time);
   ctx.clearRect(0,0,WIDTH,HEIGHT);
-  ctx.fillStyle = '#080e18'; ctx.fillRect(0,0,WIDTH,HEIGHT);
+  ctx.fillStyle = INK; ctx.fillRect(0,0,WIDTH,HEIGHT);
   const bg = ctx.createRadialGradient(CX,CY,10,CX,CY,800);
-  bg.addColorStop(0,'#13263a'); bg.addColorStop(1,'#080e18'); ctx.fillStyle=bg; ctx.fillRect(0,0,WIDTH,HEIGHT);
-  ctx.textAlign='left'; ctx.fillStyle='#e9f4ff'; ctx.font='600 36px system-ui'; ctx.fillText(fitText(ctx,manifest.project.name,1050),82,77);
-  ctx.font='18px system-ui'; ctx.fillStyle='#9aaec4'; ctx.fillText(`${manifest.project.branch}  /  ${manifest.commits?.length || 0} commits  /  ${manifest.settings?.timeZone || 'Asia/Shanghai'}`,84,111);
-  ctx.textAlign='right'; ctx.fillStyle='#e9f4ff'; ctx.font='600 34px system-ui'; ctx.fillText(`${number(state.churn)} 行改动`,1838,77);
-  if(state.retentionAvailable) {
-    ctx.font='600 25px system-ui';ctx.fillStyle='#9fe5e1';
-    ctx.fillText(`已呈现存留 ${number(state.retainedLines)} 行`,1838,112);
-    ctx.font='16px system-ui';ctx.fillStyle='#9aaec4';
-    const unmapped=manifest.retention.unmappedLines;
-    ctx.fillText(`项目最终存留 ${manifest.retention.totalLines.toLocaleString('zh-CN')} 行${unmapped ? ` · 未纳入事件 ${unmapped.toLocaleString('zh-CN')} 行` : ''}`,1838,139);
-  } else {
-    ctx.font='18px system-ui';ctx.fillStyle='#9aaec4';ctx.fillText('最终存留未分析',1838,112);
-  }
-  ctx.font='18px system-ui'; ctx.fillStyle='#9aaec4'; ctx.fillText(clock ? clock.label : '等待首次贡献',1838,166);
-  if (clock?.skippedDays) { ctx.font='16px system-ui'; ctx.fillStyle='#9fe5e1'; ctx.fillText(`跳过 ${clock.skippedDays} 个无提交日`,1838,192); }
+  bg.addColorStop(0,'#111D2B'); bg.addColorStop(1,INK); ctx.fillStyle=bg; ctx.fillRect(0,0,WIDTH,HEIGHT);
+  ctx.textAlign='left'; ctx.fillStyle=TEXT; ctx.font='600 34px system-ui'; ctx.fillText(fitText(ctx,manifest.project.name,560),82,77);
+  ctx.font='18px system-ui'; ctx.fillStyle=MUTED;
+  ctx.fillText(fitText(ctx,manifest.project.branch,560),84,111);
+  ctx.textAlign='right'; ctx.font=`24px ${MONO}`; ctx.fillStyle=TEXT;
+  ctx.fillText(clock ? clock.label : '等待首次贡献',1838,1015);
+  if (clock?.skippedDays) { ctx.font='16px system-ui'; ctx.fillStyle=ACCENT; ctx.fillText(`跳过 ${clock.skippedDays} 个无提交日`,1838,980); }
 
-  ctx.strokeStyle='#294156'; ctx.lineWidth=1.5; ctx.beginPath(); ctx.ellipse(CX,CY,RX,RY,0,0,Math.PI*2); ctx.stroke();
+  ctx.strokeStyle='#304152'; ctx.lineWidth=1; ctx.beginPath(); ctx.ellipse(CX,CY,RX,RY,0,0,Math.PI*2); ctx.stroke();
   for (let h=0;h<24;h++) {
     const a=Math.PI/2+h*Math.PI/12, major=h%6===0;
-    ctx.strokeStyle=major?'#8ba5bd':'#365168'; ctx.lineWidth=major?2:1;
+    ctx.strokeStyle=major?'#879CAE':'#304152'; ctx.lineWidth=major?1.5:1;
     ctx.beginPath(); ctx.moveTo(CX+Math.cos(a)*RX,CY+Math.sin(a)*RY); ctx.lineTo(CX+Math.cos(a)*(RX+ (major?15:7)),CY+Math.sin(a)*(RY+(major?15:7))); ctx.stroke();
-    if (h%3===0) { ctx.textAlign='center'; ctx.font=major?'600 24px system-ui':'17px system-ui'; ctx.fillStyle=major?'#d7e8f7':'#9aaec4'; ctx.fillText(`${String(h).padStart(2,'0')}:00`,CX+Math.cos(a)*(RX+58),CY+Math.sin(a)*(RY+38)+8); }
+    if (h%3===0) { ctx.textAlign='center'; ctx.font=major?`600 24px ${MONO}`:`17px ${MONO}`; ctx.fillStyle=major?TEXT:MUTED; ctx.fillText(`${String(h).padStart(2,'0')}:00`,CX+Math.cos(a)*(RX+58),CY+Math.sin(a)*(RY+38)+8); }
   }
 
 
@@ -243,7 +249,7 @@ export function drawHistory(ctx, manifest, time) {
       const before=curve(particle.path,clamp(q-i*.012)), after=curve(particle.path,clamp(q-(i-1)*.012));
       ctx.globalAlpha=opacity*(1-i/9)*.55; ctx.beginPath(); ctx.moveTo(before.x,before.y); ctx.lineTo(after.x,after.y); ctx.stroke();
     }
-    ctx.globalAlpha=opacity; ctx.shadowBlur=14; ctx.shadowColor=particle.color; ctx.fillStyle=particle.color;
+    ctx.globalAlpha=opacity; ctx.shadowBlur=8; ctx.shadowColor=particle.color; ctx.fillStyle=particle.color;
     circle(ctx,pos.x,pos.y,particleRadius(particle.churn)); ctx.fill();
     if(p<.22) { ctx.globalAlpha=(1-p/.22)*.8; circle(ctx,particle.path.sx,particle.path.sy,8+p*55); ctx.stroke(); }
     ctx.restore();
@@ -255,22 +261,27 @@ export function drawHistory(ctx, manifest, time) {
     const radius=node.radius ? node.radius*Math.sqrt(node.visualChurn/Math.max(1,node.finalChurn)) : 0;
     const pulse=since<.5 ? Math.sin(Math.PI*since/.5)*2.5 : 0;
     const r=Math.max(1,radius)+pulse;
-    ctx.save(); ctx.shadowBlur=22; ctx.shadowColor=node.color; ctx.fillStyle=node.color; ctx.globalAlpha=.14;
+    ctx.save();
+    const shell=ctx.createRadialGradient(node.x-r*.3,node.y-r*.35,0,node.x,node.y,r*1.2);
+    const channels=node.color.slice(1).match(/../g).map(value=>parseInt(value,16));
+    const light=channels.map(value=>Math.round(value+(255-value)*.25)).join(',');
+    const dark=channels.map(value=>Math.round(value*.45)).join(',');
+    shell.addColorStop(0,`rgba(${light},.34)`);
+    shell.addColorStop(.6,`${node.color}29`);
+    shell.addColorStop(1,`rgba(${dark},.12)`);
+    ctx.fillStyle=shell;
     circle(ctx,node.x,node.y,r);ctx.fill();
     if(state.retentionAvailable && node.visualRetainedLines>0){
       const inner=node.radius*Math.sqrt(node.visualRetainedLines/Math.max(1,node.finalChurn));
-      ctx.globalAlpha=.48;ctx.shadowBlur=0;circle(ctx,node.x,node.y,inner);ctx.fill();
+      const core=ctx.createRadialGradient(node.x-inner*.3,node.y-inner*.35,0,node.x,node.y,inner*1.2);
+      core.addColorStop(0,`rgba(${ballTone(channels,.14)},.95)`);
+      core.addColorStop(.65,`rgba(${ballTone(channels,.1)},.9)`);
+      core.addColorStop(1,`rgba(${ballTone(channels,.065)},.85)`);
+      ctx.fillStyle=core;circle(ctx,node.x,node.y,inner);ctx.fill();
     }
     ctx.globalAlpha=1;ctx.shadowBlur=0;ctx.strokeStyle=node.color;ctx.lineWidth=2;
     circle(ctx,node.x,node.y,r);ctx.stroke();
     if(since<.6){ctx.globalAlpha=(1-since/.6)*.6;circle(ctx,node.x,node.y,r+since*25);ctx.stroke();ctx.globalAlpha=1;}
-    ctx.textAlign='center';ctx.fillStyle='#edf5ff';ctx.font='600 20px system-ui';
-    ctx.fillText(fitText(ctx,node.name,Math.max(74,Math.min(170,node.envelope*2-12))),node.x,node.y-5);
-    ctx.font='16px system-ui';ctx.fillStyle='#b8cede';
-    const label = state.retentionAvailable && time >= manifest.duration - 1e-8 ? `${number(node.churn)}（${number(node.retainedLines)}）` : number(node.churn);
-    const labelWidth = Math.max(74,Math.min(170,node.envelope*2-12));
-    const labelSize = Math.min(16,16*labelWidth/Math.max(1,ctx.measureText(label).width));
-    ctx.font=`${labelSize}px system-ui`;ctx.fillText(label,node.x,node.y+20);
     ctx.restore();
   }
   // Local ripples mark the exact absorption point.
@@ -281,24 +292,45 @@ export function drawHistory(ctx, manifest, time) {
     circle(ctx,particle.path.ex,particle.path.ey,4+age*32);ctx.stroke();ctx.restore();
   }
   if (clock) {
-    ctx.save(); ctx.strokeStyle='#9fe5e1'; ctx.lineCap='round';
+    ctx.save(); ctx.strokeStyle=ACCENT; ctx.lineCap='round';
     for (let i=12;i>0;i--) {
       const a=clock.angle-i*.015, b=clock.angle-(i-1)*.015;
       ctx.globalAlpha=(1-i/13)*.8; ctx.lineWidth=3;
       ctx.beginPath(); ctx.ellipse(CX,CY,RX,RY,0,a,b); ctx.stroke();
     }
     const x=CX+Math.cos(clock.angle)*RX, y=CY+Math.sin(clock.angle)*RY;
-    ctx.globalAlpha=1;ctx.lineWidth=2;ctx.shadowBlur=16;ctx.shadowColor='#9fe5e1';
+    ctx.globalAlpha=1;ctx.lineWidth=2;ctx.shadowBlur=8;ctx.shadowColor=ACCENT;
     ctx.beginPath();ctx.moveTo(CX+Math.cos(clock.angle)*(RX-8),CY+Math.sin(clock.angle)*(RY-8));
     ctx.lineTo(CX+Math.cos(clock.angle)*(RX+16),CY+Math.sin(clock.angle)*(RY+16));ctx.stroke();
-    ctx.shadowBlur=0;ctx.fillStyle='#080e18';circle(ctx,x,y,9);ctx.fill();
-    ctx.shadowBlur=18;ctx.fillStyle='#d9fffa';circle(ctx,x,y,6);ctx.fill();ctx.restore();
+    ctx.shadowBlur=0;ctx.fillStyle=INK;circle(ctx,x,y,9);ctx.fill();
+    ctx.shadowBlur=9;ctx.fillStyle='#E2F2F2';circle(ctx,x,y,6);ctx.fill();ctx.restore();
   }
 
-  ctx.textAlign='left';ctx.font='16px system-ui';ctx.fillStyle='#9aaec4';
-  ctx.fillText(state.retentionAvailable ? '外圈 = 累计新增 + 删除   ·   内芯 = 最终存留（以最终 HEAD 为准，非历史当天存量）   ·   末帧括号 = 存留   ·   粒子 = 单次改动量   ·   入口 = 作者提交时刻' : '球面积 = 累计新增 + 删除   ·   粒子 = 单次改动量   ·   入口 = 作者提交时刻   ·   最终存留未分析：请重新生成',82,1009);
+  for(const node of state.nodes) {
+    if(!node.commitCount)continue;
+    ctx.save();ctx.textAlign='center';
+    const largeLabel=ballRadius(node)>=60;
+    const value=state.retentionAvailable && time>=manifest.duration-1e-8 ? `${number(node.churn)}（${number(node.retainedLines)}）` : number(node.churn);
+    ctx.font=`600 ${largeLabel ? 24 : 16}px system-ui`;
+    ctx.fillStyle=TEXT;
+    ctx.fillText(node.name,node.x,node.y-4);
+    ctx.font=`${largeLabel ? 18 : 12}px ${MONO}`;
+    ctx.fillText(value,node.x,node.y+20);ctx.restore();
+  }
+
+  ctx.textAlign='left';ctx.font='17px system-ui';ctx.fillStyle=MUTED;
+  ctx.fillText('外圈 = 累计新增 + 删除   ·   粒子 = 单次改动量   ·   入口 = 作者提交时刻',82,980);
+  ctx.fillText(state.retentionAvailable ? '内芯 = 最终 HEAD 存留，非历史当天存量   ·   末帧数字 = 改动（存留）' : '最终存留未分析：请重新生成',82,1009);
+  ctx.textAlign='right'; ctx.fillStyle=TEXT; ctx.font=`600 32px ${MONO}`; ctx.fillText(`总变更 ${number(state.churn)} 行`,1838,77);
+  if(state.retentionAvailable) {
+    ctx.font=`23px ${MONO}`;ctx.fillStyle=ACCENT;
+    ctx.fillText(`留存 ${number(state.retainedLines)} 行`,1838,112);
+  } else {
+    ctx.font='18px system-ui';ctx.fillStyle=MUTED;ctx.fillText('最终存留未分析',1838,112);
+  }
+
   ctx.strokeStyle='#294156';ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(82,1043);ctx.lineTo(1838,1043);ctx.stroke();
-  ctx.strokeStyle='#9fe5e1';ctx.beginPath();ctx.moveTo(82,1043);ctx.lineTo(82+1756*clamp(time/manifest.duration),1043);ctx.stroke();
+  ctx.strokeStyle=ACCENT;ctx.beginPath();ctx.moveTo(82,1043);ctx.lineTo(82+1756*clamp(time/manifest.duration),1043);ctx.stroke();
   return state.nodes;
 }
 

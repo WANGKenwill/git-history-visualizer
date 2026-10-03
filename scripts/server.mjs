@@ -121,12 +121,33 @@ const server = createServer(async (request, response) => {
     if (request.method === "POST" && url.pathname === "/api/export") {
       if (exporting) return json(response, 409, { ok: false, error: "已有导出任务正在运行，请等待完成" });
       exporting = true;
+      const streaming = request.headers.accept?.includes("application/x-ndjson");
+      const send = event => { if (!response.destroyed) response.write(`${JSON.stringify(event)}\n`); };
       try {
         const { manifest } = await readBody(request, 64 * 1024 * 1024);
         if (manifest?.version !== 2 || !Array.isArray(manifest.commits) || !Array.isArray(manifest.authors)) throw new Error("缺少有效的当前页面 manifest，请刷新页面后重试");
+        if (!(manifest.duration > 0 && Number.isFinite(manifest.duration))) throw new Error("导出时长无效");
         const output = join(exportDir, `git-history-${Date.now()}.mp4`);
-        await exportVideo({ manifest, output });
-        return json(response, 200, { ok: true, file: `/exports/${basename(output)}` });
+        let lastProgress = -Infinity;
+        if (streaming) {
+          response.writeHead(200, { "content-type": "application/x-ndjson; charset=utf-8", "cache-control": "no-store" });
+          send({ type: "start" });
+        }
+        await exportVideo({ manifest, output, onProgress: (frame, total) => {
+          if (!streaming) return;
+          const now = performance.now();
+          if (frame === 1 || frame === total || now - lastProgress >= 250) {
+            lastProgress = now;
+            send({ type: "progress", frame, total });
+          }
+        } });
+        const file = `/exports/${basename(output)}`;
+        if (streaming) { send({ type: "complete", file }); return response.end(); }
+        return json(response, 200, { ok: true, file });
+      } catch (error) {
+        if (!response.headersSent) throw error;
+        send({ type: "error", error: error instanceof Error ? error.message : String(error) });
+        return response.end();
       } finally { exporting = false; }
     }
     let file = url.pathname === "/" ? "/studio.html" : url.pathname;
@@ -149,4 +170,12 @@ const server = createServer(async (request, response) => {
 });
 
 const port = Number(process.env.GIT_HISTORY_PORT || 4173);
-server.listen(port, "127.0.0.1", () => console.log(`Git History Visualizer: http://127.0.0.1:${port}`));
+server.listen(port, "127.0.0.1", () => {
+  const address = `http://127.0.0.1:${server.address().port}/`;
+  console.log(`Git History Visualizer: ${address}`);
+  if (process.platform === "darwin" && !process.argv.includes("--no-open")) {
+    execFile("open", [address], error => {
+      if (error) console.error(`无法自动打开浏览器，请手动访问 ${address}`);
+    });
+  }
+});

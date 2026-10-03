@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 const root=fileURLToPath(new URL('../..',import.meta.url));
 
-export async function serverFixture(t) {
+export async function serverFixture(t, env = {}, args = ['--no-open']) {
   const dir=mkdtempSync(join(tmpdir(),'history-server-'));
   const app=join(dir,'app'), repo=join(dir,'repo');
   mkdirSync(app);mkdirSync(repo);
@@ -22,7 +22,7 @@ export async function serverFixture(t) {
   await new Promise(done=>reservation.listen(0,'127.0.0.1',done));
   const port=reservation.address().port;
   await new Promise(done=>reservation.close(done));
-  const child=spawn(process.execPath,[join(app,'scripts/server.mjs')],{env:{...process.env,GIT_HISTORY_PORT:String(port)},stdio:['ignore','pipe','pipe']});
+  const child=spawn(process.execPath,[join(app,'scripts/server.mjs'),...args],{env:{...process.env,...env,GIT_HISTORY_PORT:String(port)},stdio:['ignore','pipe','pipe']});
   let stderr='';child.stderr.on('data',chunk=>{stderr+=chunk;});
   t.after(async()=>{
     if(child.exitCode===null){const closed=once(child,'close');child.kill();await closed;}
@@ -35,5 +35,5 @@ export async function serverFixture(t) {
     assert.equal(response.status,200,result.error);
     return result.manifest;
   };
-  return {dir,repo,git,analyze,origin:`http://127.0.0.1:${port}`};
+  return {dir,repo,git,analyze,origin:`http://127.0.0.1:${port}`,get stderr(){return stderr;}};
 }
