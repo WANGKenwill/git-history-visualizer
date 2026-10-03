@@ -1,0 +1,22 @@
+{
+  "version": 2,
+  "project": {
+    "name": "Git History",
+    "branch": "main",
+    "repo": "",
+    "source": ""
+  },
+  "duration": 60,
+  "settings": {
+    "timeZone": "Asia/Shanghai",
+    "maxAuthors": 16,
+    "accountLinks": {}
+  },
+  "rules": {},
+  "layout": {},
+  "authors": [],
+  "groups": [],
+  "commits": [],
+  "totalChurn": 0,
+  "totalLines": 0
+}

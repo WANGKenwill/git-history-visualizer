@@ -1,0 +1,6 @@
+.cache/
+exports/
+node_modules/
+snapshots/
+.hyperframes/
+.thumbnails/

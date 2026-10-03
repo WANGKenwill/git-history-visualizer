@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=1920, height=1080">
+  <style>
+    html, body { margin: 0; width: 1920px; height: 1080px; overflow: hidden; background: #0b1017; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+  <canvas id="scene" width="1920" height="1080"></canvas>
+  <script type="module">
+    import { drawHistory } from "./src/visualizer.js";
+    const canvas = document.querySelector("#scene");
+    const ctx = canvas.getContext("2d");
+    window.renderFrame = (manifest, time) => {
+      const nodes = drawHistory(ctx, manifest, time);
+      return { churn: nodes.reduce((sum, node) => sum + node.churn, 0), retainedLines: nodes.reduce((sum, node) => sum + node.retainedLines, 0) };
+    };
+  </script>
+</body>
+</html>

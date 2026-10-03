@@ -1,0 +1,17 @@
+{
+  "name": "git-history-visualizer",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "studio": "node scripts/server.mjs",
+    "dev": "node scripts/server.mjs",
+    "analyze": "node scripts/analyze-history.mjs",
+    "check": "node --test tests/*.test.mjs",
+    "render": "node scripts/export-video.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "setup:browser": "playwright install chromium"
+  },
+  "dependencies": {
+    "playwright": "1.63.0"
+  }
+}

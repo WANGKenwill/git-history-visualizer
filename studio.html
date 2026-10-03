@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Git History Visualizer</title>
+    <style>
+      :root { color-scheme: dark; --bg: #080b10; --panel: #121a24; --line: #263343; --fg: #edf3f8; --muted: #8795a5; --accent: #ffb000; }
+      * { box-sizing: border-box; }
+      body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--fg); font-family: "IBM Plex Mono", ui-monospace, monospace; }
+      .shell { display: grid; grid-template-columns: 320px minmax(0, 1fr); min-height: 100vh; }
+      aside { padding: 34px 26px; background: var(--panel); border-right: 1px solid var(--line); }
+      h1 { margin: 0 0 10px; font: 900 27px "Archivo Black", system-ui; letter-spacing: -.03em; }
+      .lede { margin: 0 0 30px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+      label { display: block; margin: 18px 0 7px; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+      input, button, select { width: 100%; border: 1px solid var(--line); border-radius: 9px; padding: 11px 12px; background: #0b1119; color: var(--fg); font: inherit; }
+      button { margin-top: 18px; background: var(--accent); border-color: var(--accent); color: #211705; font-weight: 700; cursor: pointer; }
+      button.secondary { background: transparent; border-color: #53677d; color: var(--fg); }
+      button:disabled { opacity: .5; cursor: wait; }
+      #status { min-height: 44px; margin-top: 20px; color: var(--muted); font-size: 12px; line-height: 1.55; }
+      main { padding: 28px; display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+      .stage { width: 100%; aspect-ratio: 16 / 9; background: #0b1017; border: 1px solid var(--line); border-radius: 16px; overflow: hidden; box-shadow: 0 28px 80px rgba(0,0,0,.35); }
+      canvas { display: block; width: 100%; height: 100%; }
+      .toolbar { display: flex; align-items: center; gap: 14px; }
+      .toolbar button { width: auto; min-width: 110px; margin: 0; }
+      input[type="range"] { flex: 1; padding: 0; accent-color: var(--accent); }
+      #time-label { width: 100px; color: var(--muted); font-size: 12px; text-align: right; }
+      .summary { display: flex; gap: 12px; flex-wrap: wrap; }
+      .stat { padding: 12px 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+      .stat strong { display: block; margin-bottom: 4px; font-size: 20px; color: var(--accent); }
+      .stat span { color: var(--muted); font-size: 11px; }
+      #accounts { border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+      .account-row { display: grid; grid-template-columns: minmax(180px,1fr) minmax(160px,1fr) auto; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--line); align-items: center; }
+      .account-name { overflow-wrap: anywhere; font-size: 13px; }
+      .account-name small { display: block; color: var(--muted); margin-top: 5px; }
+      .account-actions { display: flex; gap: 6px; }
+      .account-actions button:disabled { cursor: default; }
+      .account-actions button { width: auto; margin: 0; padding: 8px; font-size: 12px; }
+      .account-row select { grid-column: 2 / 4; font-size: 12px; }
+      #account-status { font-size: 12px; color: var(--muted); }
+      @media (max-width: 1100px) { .account-row { grid-template-columns: 1fr; } .account-row select { grid-column: 1; } }
+      a { color: var(--accent); }
+      .path-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+      .path-row button { width: auto; margin: 0; white-space: nowrap; }
+      details { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 15px; }
+      summary { color: var(--muted); font-size: 12px; cursor: pointer; }
+      details label:first-of-type { margin-top: 16px; }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <aside>
+        <h1>Git History</h1>
+        <p class="lede">用开发者球群展示累计改动，用时间环展示提交时刻。首选输入本地 Git 路径：速度快，也不需要 GitLab Token。</p>
+        <form id="form">
+          <label for="source">本地 Git 仓库</label>
+          <div class="path-row"><input id="source" placeholder="点击右侧按钮选择文件夹" readonly /><button id="pick-local" type="button" class="secondary">选择文件夹</button></div>
+          <details>
+            <summary>远程 GitLab（可选，较慢）</summary>
+            <label for="remote-source">GitLab 仓库 URL</label>
+            <input id="remote-source" placeholder="https://gitlab.example.com/group/project" />
+            <label for="token">GitLab Token</label>
+            <input id="token" type="password" placeholder="仅远程私有仓库需要" />
+          </details>
+          <label for="branch">主分支</label>
+          <input id="branch" value="main" />
+          <label for="duration">视频时长（秒）</label>
+          <input id="duration" type="number" min="15" max="180" value="60" />
+          <label for="time-zone">提交时区</label>
+          <input id="time-zone" value="Asia/Shanghai" />
+          <label for="max-authors">显示作者人数（其余汇总）</label>
+          <input id="max-authors" type="number" min="1" max="32" value="16" />
+          <button id="analyze">生成可视化</button>
+        </form>
+        <button id="export" class="secondary" disabled>导出 MP4</button>
+        <div id="status">等待导入仓库。</div>
+      </aside>
+      <main>
+        <div class="stage"><canvas id="preview" width="1920" height="1080"></canvas></div>
+        <div class="toolbar"><button id="play" class="secondary">播放</button><input id="scrub" type="range" min="0" max="60" step="0.01" value="0" /><span id="time-label">0.0s / 60s</span></div>
+        <div id="summary" class="summary"></div>
+        <div id="author-detail" class="stat"><span id="author-stats">点击开发者球查看累计改动与合并分组。</span><details id="merge-details" hidden><summary></summary><div id="merge-groups"></div></details></div>
+        <details id="accounts"><summary>账号关联（配置后点击“生成可视化”生效）</summary><p id="account-status"></p><div id="account-list"></div></details>
+        <p class="lede">改动量不等于贡献质量；合并提交与冲突解决改动不单独计入。Squash 仅展示保留的提交和作者。</p>
+      </main>
+    </div>
+    <script src="./data/manifest.js"></script>
+    <script type="module">
+      import { drawHistory, hitAuthor, prepareHistory, historyState } from "./src/visualizer.js";
+      import { accountLinks, changeAccount } from "./src/accounts.js";
+      const $ = (selector) => document.querySelector(selector);
+      const canvas = $("#preview"); const ctx = canvas.getContext("2d");
+      const fallback = { project: { name: "Git history", branch: "main" }, duration: 60, commits: [], groups: [], settings: { timeZone: "Asia/Shanghai", maxAuthors: 16 }, totalChurn: 0, authors: [], initialLines: 0, totalLines: 0 };
+      let manifest = window.__GIT_MANIFEST__?.version === 2 ? window.__GIT_MANIFEST__ : fallback; let time = 0; let playing = false; let lastFrame = 0;
+      function render() { const nodes = drawHistory(ctx, manifest, time); currentChurn = nodes.reduce((sum,n)=>sum+n.churn,0); showDetail(); $("#scrub").value = time; $("#time-label").textContent = `${time.toFixed(1)}s / ${manifest.duration}s`; }
+      function tick(now) { if (playing) { if (!lastFrame) lastFrame = now; time += (now - lastFrame) / 1000; if (time >= manifest.duration) { time = manifest.duration; playing = false; $("#play").textContent = "播放"; } lastFrame = now; render(); } else lastFrame = 0; requestAnimationFrame(tick); }
+      let selectedAuthor = null;
+      let loadedSource = manifest.project.source || manifest.project.repo;
+      let draftLinks = accountLinks(manifest.authors, manifest.settings?.accountLinks);
+      function showAccounts() {
+        const list = $('#account-list'); list.replaceChildren();
+        const roots = manifest.authors.filter(a => !draftLinks[a.id]);
+        for (const author of manifest.authors) {
+          const root = draftLinks[author.id] || author.id;
+          const row = document.createElement('div'); row.className='account-row';
+          const name = document.createElement('div'); name.className='account-name'; name.textContent=author.name;
+          const email = document.createElement('small'); email.textContent=author.email || author.id; name.append(email);
+          const relation = document.createElement('div'); relation.className='account-name';
+          relation.textContent=root===author.id ? '主账号' : `关联到：${manifest.authors.find(a=>a.id===root).name}`;
+          const actions = document.createElement('div'); actions.className='account-actions';
+          const chooser=document.createElement('select'); chooser.hidden=true; chooser.setAttribute('aria-label',`将 ${author.id} 关联到主账号`);
+          const placeholder=document.createElement('option'); placeholder.value='';placeholder.textContent='选择主账号…';chooser.append(placeholder);
+          for (const main of roots.filter(a=>a.id!==root)) { const option=document.createElement('option');option.value=main.id;option.textContent=`${main.name} · ${main.email || main.id}`;chooser.append(option); }
+          const apply=(action,target)=>{ draftLinks=changeAccount(manifest.authors,draftLinks,author.id,action,target);showAccounts();$('#account-status').textContent='关联配置已修改，点击左侧“生成可视化”后生效并保存。';$('#export').disabled=true; };
+          chooser.addEventListener('change',()=>{if(chooser.value)apply('link',chooser.value);});
+          for (const [title,action,disabled] of [['关联到','link',roots.every(a=>a.id===root)],['解除关联','unlink',root===author.id],['设为主账号','primary',root===author.id]]) {
+            const button=document.createElement('button');button.type='button';button.className='secondary';button.textContent=title;button.disabled=disabled;
+            button.addEventListener('click',()=>{if(action==='link'){chooser.hidden=!chooser.hidden;}else apply(action);});actions.append(button);
+          }
+          row.append(name,relation,actions,chooser);list.append(row);
+        }
+        $('#account-status').textContent=`${manifest.authors.length} 个账号 → ${roots.length} 位开发者。关联主账号会将该组一起归入目标主账号；解除关联仅拆出当前账号。`;
+      }
+      function showDetail() {
+        const stats = $("#author-stats"), details = $("#merge-details"), list = $("#merge-groups");
+        const node = selectedAuthor && historyState(manifest,time).nodes.find(n=>n.id===selectedAuthor && n.commitCount);
+        if (!node) { stats.textContent = "点击开发者球查看累计改动与合并分组。"; details.hidden = true; details.open = false; details.dataset.groups = ''; list.replaceChildren(); return; }
+        const groups = [...new Set(prepareHistory(manifest).arrivals.filter(c => c.arrival <= time && c.displayAuthorId === node.id).flatMap(c=>c.groupIds))];
+        stats.textContent = `${node.name} · 新增 ${node.additions.toLocaleString()} / 删除 ${node.deletions.toLocaleString()} / 改动 ${node.churn.toLocaleString()} · 占当前累计改动 ${(node.churn / Math.max(1, currentChurn) * 100).toFixed(1)}% · ${node.commitCount} 个提交`;
+        if (manifest.retention?.version === 1) {
+          stats.append(` · 当前已呈现的最终存留 ${node.retainedLines.toLocaleString()} / 作者最终存留 ${node.finalRetainedLines.toLocaleString()} · 作者占项目最终存留 ${(node.finalRetainedLines / Math.max(1,manifest.retention.totalLines) * 100).toFixed(1)}%`);
+          if(manifest.retention.unmappedLines)stats.append(` · 项目有 ${manifest.retention.unmappedLines.toLocaleString()} 行未纳入贡献事件`);
+        } else stats.append(' · 最终存留未分析，请重新生成');
+        details.hidden = !groups.length;
+        if (!groups.length) details.open = false;
+        const groupKey = JSON.stringify(groups);
+        if (details.dataset.groups !== groupKey) {
+          details.dataset.groups = groupKey;
+          details.querySelector('summary').textContent = `查看 ${groups.length} 个合并组`;
+          list.replaceChildren();
+          for (const id of groups) { const group = manifest.groups.find(g=>g.id===id); if(group) { const line = document.createElement('div'); line.textContent = `合并组 ${id.slice(0,7)}：${group.title}`; list.append(line); } }
+        }
+      }
+      let currentChurn = 0;
+      canvas.addEventListener('click', event => { const bounds = canvas.getBoundingClientRect(); selectedAuthor = hitAuthor(manifest,time,(event.clientX-bounds.left)*1920/bounds.width,(event.clientY-bounds.top)*1080/bounds.height)?.id; showDetail(); });
+      function showSummary() {
+        const values = [[manifest.commits.length, "非合并提交"], [prepareHistory(manifest).authors.length, "开发者"], [(manifest.totalChurn || 0).toLocaleString("zh-CN"), "累计改动行数"], [manifest.groups.length, "合并组"]];
+        values.push([manifest.retention?.version===1 ? manifest.retention.totalLines.toLocaleString('zh-CN') : '未分析', '最终存留行数']);
+        if(manifest.retention?.unmappedLines)values.push([manifest.retention.unmappedLines.toLocaleString('zh-CN'),'未纳入贡献事件']);
+        $("#summary").innerHTML = values.map(([value, label]) => `<div class="stat"><strong>${value}</strong><span>${label}</span></div>`).join("");
+      }
+      $("#pick-local").addEventListener("click", async () => { const button = $("#pick-local"); button.disabled = true; try { const result = await (await fetch("/api/pick-local")).json(); if (result.ok) { $("#source").value = result.path; $("#remote-source").value = ""; $("#status").textContent = "已选择本地仓库，可以生成可视化。"; } else if (!result.cancelled) $("#status").textContent = result.error || "本地目录弹窗不可用。"; } catch (error) { $("#status").textContent = `选择失败：${error.message}`; } finally { button.disabled = false; } });
+      $("#form").addEventListener("submit", async (event) => { event.preventDefault(); const button = $("#analyze"); const remote = $("#remote-source").value.trim(); const source = remote || $("#source").value.trim(); if (!source) { $("#status").textContent = "请先选择本地仓库，或在远程 GitLab 区域填写 URL。"; return; } button.disabled = true; $("#status").textContent = "正在读取 Git 历史与最终存留归属…"; try { const response = await fetch("/api/analyze", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ source, token: remote ? $("#token").value : "", branch: $("#branch").value, duration: $("#duration").value, timeZone: $("#time-zone").value.trim(), maxAuthors: $("#max-authors").value, accountLinks: source === manifest.project.repo || source === loadedSource ? draftLinks : undefined }) }); const result = await response.json(); if (!result.ok) throw new Error(result.error); manifest = result.manifest; loadedSource = source; draftLinks = accountLinks(manifest.authors,manifest.settings.accountLinks); showAccounts(); selectedAuthor = null; playing = false; lastFrame = 0; $("#play").textContent = "播放"; time = 0; $("#scrub").max = manifest.duration; $("#export").disabled = false; const cacheText = result.analysis?.cacheHit ? "命中缓存" : result.analysis?.incremental ? `增量分析 ${result.analysis.analyzedEvents} 个新事件` : "首次全量分析"; $("#status").textContent = `已生成 ${manifest.commits.length} 个事件（${cacheText}）。Token 未写入项目文件。`; showSummary(); render(); } catch (error) { $("#status").textContent = `生成失败：${error.message}`; } finally { button.disabled = false; } });
+      $("#scrub").addEventListener("input", () => { playing = false; $("#play").textContent = "播放"; time = Number($("#scrub").value); render(); });
+      $("#play").addEventListener("click", () => { playing = !playing; lastFrame = 0; $("#play").textContent = playing ? "暂停" : "播放"; });
+      $("#export").addEventListener("click", async () => { const button = $("#export"); button.disabled = true; $("#status").textContent = "正在逐帧导出 MP4…"; try { const result = await (await fetch("/api/export", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ manifest }) })).json(); if (!result.ok) throw new Error(result.error); $("#status").innerHTML = `导出完成：<a href="${result.file}" download>下载 MP4</a>`; } catch (error) { $("#status").textContent = `导出失败：${error.message}`; } finally { button.disabled = false; } });
+      if (manifest.version === 2) {
+        $("#source").value = manifest.project.repo;
+        if (manifest.project.source?.startsWith("http")) $("#remote-source").value = manifest.project.source;
+        $("#branch").value = manifest.project.source?.startsWith("http") ? manifest.project.branch.replace(/^origin\//, "") : manifest.project.branch;
+        $("#duration").value = manifest.duration;
+        $("#time-zone").value = manifest.settings.timeZone;
+        $("#max-authors").value = manifest.settings.maxAuthors;
+        $("#scrub").max = manifest.duration;
+        $("#export").disabled = false;
+        $("#status").textContent = "已载入上次生成的历史，可以播放或重新分析。";
+      }
+      render(); showSummary(); showAccounts(); requestAnimationFrame(tick);
+    </script>
+  </body>
+</html>
