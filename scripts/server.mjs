@@ -2,7 +2,7 @@ import { AppError, t, normalizeLocale } from '../src/i18n.js';
 import { createHash, randomUUID } from "node:crypto";
 import { execFile, execFileSync } from "node:child_process";
 import { createServer } from "node:http";
-import { createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -46,13 +46,14 @@ async function uploadAudio(request) {
     });
     const duration = Number(probe.streams?.[0]?.duration || probe.format?.duration);
     if (probe.streams?.[0]?.codec_type !== 'audio' || !Number.isFinite(duration) || duration <= 0) throw new AppError('error.invalidAudio');
-    audioFiles.set(id, path);
+    audioFiles.set(id, { path, duration, type: /^audio\/[\w.+-]+$/.test(request.headers['content-type'] || '') ? request.headers['content-type'] : 'application/octet-stream' });
     return { id, duration };
   } catch (error) { rmSync(path, { force: true }); throw error; }
 }
 
-function errorPayload(error) {
-  console.error(error);
+function errorPayload(error, context) {
+  if (context) console.warn(`[http] ${context.method} ${context.path} ${context.status} ${error.code}`);
+  else console.error(error);
   const known = error instanceof AppError || error.code?.startsWith?.('error.') ? error : error.cause instanceof AppError ? error.cause : null;
   return { error: error instanceof Error ? error.message : String(error), errorCode: known?.code || 'error.unknown', errorParams: known?.params || {} };
 }
@@ -209,16 +210,88 @@ function contentType(path) {
   return { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".json": "application/json; charset=utf-8" }[extname(path)] || "application/octet-stream";
 }
 
+const exportStatusPath = join(dataDir, 'export.json');
+const activeStages = new Set(['preparing', 'rendering', 'encoding']);
+let exportTask = null, lastStatusSave = 0;
+function saveExportStatus() {
+  writeFileSync(`${exportStatusPath}.tmp`, JSON.stringify(exportTask));
+  renameSync(`${exportStatusPath}.tmp`, exportStatusPath);
+  lastStatusSave = Date.now();
+}
+function checkExportFile() {
+  if (exportTask?.stage !== 'complete') return;
+  const file = exportTask.file;
+  const path = typeof file === 'string' && /^\/exports\/[^/\\]+\.mp4$/.test(file) ? join(exportDir, basename(file)) : null;
+  if (!path || !existsSync(path) || realpathSync(path) !== path) {
+    exportTask = { ...exportTask, stage: 'failed', file: undefined, errorCode: 'error.exportFileMissing' };
+    saveExportStatus();
+  }
+}
+try { exportTask = JSON.parse(readFileSync(exportStatusPath, 'utf8')); } catch {}
+if (activeStages.has(exportTask?.stage)) {
+  exportTask = { ...exportTask, stage: 'interrupted', errorCode: 'exportInterrupted' };
+  saveExportStatus();
+}
+checkExportFile();
+
+function serveAudio(request, response, audio) {
+  const size = statSync(audio.path).size;
+  const headers = { 'content-type': audio.type, 'accept-ranges': 'bytes', 'cache-control': 'no-store' };
+  let start = 0, end = size - 1;
+  if (request.headers.range) {
+    const match = /^bytes=(\d*)-(\d*)$/.exec(request.headers.range);
+    if (match && (match[1] || match[2])) {
+      start = match[1] ? Number(match[1]) : Math.max(0, size - Number(match[2]));
+      end = match[1] && match[2] ? Math.min(size - 1, Number(match[2])) : size - 1;
+    }
+    if (!match || (!match[1] && !match[2]) || start > end || start >= size) {
+      response.writeHead(416, { ...headers, 'content-range': `bytes */${size}` }); return response.end();
+    }
+    headers['content-range'] = `bytes ${start}-${end}/${size}`;
+  }
+  response.writeHead(request.headers.range ? 206 : 200, { ...headers, 'content-length': end - start + 1 });
+  if (request.method === 'HEAD') return response.end();
+  const stream = createReadStream(audio.path, { start, end });
+  stream.on('error', () => response.destroy());
+  response.on('close', () => stream.destroy());
+  stream.pipe(response);
+}
+
 let exporting = false, analyzing = false;
 const server = createServer(async (request, response) => {
   try {
     const url = new URL(request.url, "http://localhost");
+    const rejectStatic = (status, code) => json(response, status, {
+      ok: false, ...errorPayload(new AppError(code), { method: request.method, path: url.pathname, status }),
+    });
+    if (request.method === "GET" || request.method === "HEAD") {
+      if (url.pathname === "/favicon.ico") {
+        response.writeHead(204, { "cache-control": "private, max-age=86400" });
+        return response.end();
+      }
+      if (url.pathname === "/.well-known/appspecific/com.chrome.devtools.json") {
+        response.writeHead(404, { "cache-control": "no-store" });
+        return response.end();
+      }
+    }
+    if (request.method === 'GET' && url.pathname === '/api/export/status') {
+      checkExportFile();
+      return json(response, 200, { ok: true, task: exportTask });
+    }
+    const audioRoute = /^\/api\/audio\/([^/]+)(\/file)?$/.exec(url.pathname);
+    if (audioRoute && (request.method === 'GET' || request.method === 'HEAD')) {
+      const audio = audioFiles.get(audioRoute[1]);
+      if (!audio || !existsSync(audio.path)) return json(response, 404, { ok: false, errorCode: 'error.audioMissing' });
+      if (audioRoute[2]) return serveAudio(request, response, audio);
+      return json(response, 200, { ok: true, id: audioRoute[1], duration: audio.duration });
+    }
     if (request.method === "POST" && url.pathname === "/api/audio") {
       return json(response, 200, { ok: true, ...await uploadAudio(request) });
     }
     if (request.method === "DELETE" && url.pathname.startsWith("/api/audio/")) {
-      const id = url.pathname.slice('/api/audio/'.length), path = audioFiles.get(id);
-      if (path) { rmSync(path, { force: true }); audioFiles.delete(id); }
+      const id = url.pathname.slice('/api/audio/'.length), audio = audioFiles.get(id);
+      if (exporting && exportTask?.audioId === id) return json(response, 409, { ok: false, errorCode: 'error.audioBusy' });
+      if (audio) { rmSync(audio.path, { force: true }); audioFiles.delete(id); }
       return json(response, 200, { ok: true });
     }
     if (request.method === "GET" && url.pathname === "/api/pick-local") {
@@ -259,21 +332,29 @@ const server = createServer(async (request, response) => {
     if (request.method === "POST" && url.pathname === "/api/export") {
       if (exporting) return json(response, 409, { ok: false, ...errorPayload(new AppError('error.exportBusy')) });
       exporting = true;
+      exportTask = { id: randomUUID(), stage: 'preparing', frame: 0, total: 0 };
+      saveExportStatus();
       const streaming = request.headers.accept?.includes("application/x-ndjson");
       const send = event => { if (!response.destroyed) response.write(`${JSON.stringify(event)}\n`); };
       try {
         const { manifest, audioId } = await readBody(request, 64 * 1024 * 1024);
-        const audioPath = audioId ? audioFiles.get(audioId) : undefined;
+        exportTask.audioId = audioId;
+        const audioPath = audioId ? audioFiles.get(audioId)?.path : undefined;
         if (audioId && !audioPath) throw new AppError('error.audioMissing');
         if (manifest?.version !== 2 || !Array.isArray(manifest.commits) || !Array.isArray(manifest.authors)) throw new AppError('error.invalidManifest');
         if (!(manifest.duration > 0 && Number.isFinite(manifest.duration))) throw new AppError('error.invalidDuration');
+        exportTask.total = Math.max(1, Math.round(manifest.duration * 30));
+        saveExportStatus();
         const output = join(exportDir, `git-history-${Date.now()}.mp4`);
         let lastProgress = -Infinity;
         if (streaming) {
           response.writeHead(200, { "content-type": "application/x-ndjson; charset=utf-8", "cache-control": "no-store" });
-          send({ type: "start" });
+          send({ type: "start", taskId: exportTask.id });
         }
-        await exportVideo({ manifest, output, audioPath, onProgress: (frame, total) => {
+        const totals = await exportVideo({ manifest, output, audioPath, onProgress: (frame, total) => {
+          exportTask.stage = frame === total ? 'encoding' : 'rendering';
+          exportTask.frame = frame; exportTask.total = total;
+          if (frame === total || Date.now() - lastStatusSave >= 1000) saveExportStatus();
           if (!streaming) return;
           const now = performance.now();
           if (frame === 1 || frame === total || now - lastProgress >= 250) {
@@ -282,9 +363,13 @@ const server = createServer(async (request, response) => {
           }
         } });
         const file = `/exports/${basename(output)}`;
+        exportTask = { ...exportTask, stage: 'complete', file, ...totals };
+        saveExportStatus();
         if (streaming) { send({ type: "complete", file }); return response.end(); }
         return json(response, 200, { ok: true, file });
       } catch (error) {
+        exportTask = { ...exportTask, stage: 'failed', ...errorPayload(error) };
+        saveExportStatus();
         if (!response.headersSent) throw error;
         send({ type: "error", ...errorPayload(error) });
         return response.end();
@@ -292,15 +377,15 @@ const server = createServer(async (request, response) => {
     }
     const file = url.pathname === "/" ? "/studio.html" : decodeURIComponent(url.pathname);
     const video = /^\/exports\/[^/\\]+\.mp4$/.test(file);
-    if (!browserAssets.has(file) && !video) return json(response, 403, { ok: false, ...errorPayload(new AppError('error.forbidden')) });
-    if (request.method !== "GET" && request.method !== "HEAD") return json(response, 405, { ok: false, ...errorPayload(new AppError('error.method')) });
+    if (!browserAssets.has(file) && !video) return rejectStatic(403, 'error.forbidden');
+    if (request.method !== "GET" && request.method !== "HEAD") return rejectStatic(405, 'error.method');
     const currentManifest = join(dataDir, "manifest.js");
     const target = file === "/data/manifest.js" && existsSync(currentManifest) ? currentManifest : resolve(root, `.${file}`);
     let content;
     try {
-      if (realpathSync(target) !== target) return json(response, 403, { ok: false, ...errorPayload(new AppError('error.forbidden')) });
+      if (realpathSync(target) !== target) return rejectStatic(403, 'error.forbidden');
       content = readFileSync(target);
-    } catch { return json(response, 404, { ok: false, ...errorPayload(new AppError('error.notFound')) }); }
+    } catch { return rejectStatic(404, 'error.notFound'); }
     response.writeHead(200, { "content-type": video ? "video/mp4" : contentType(target), "cache-control": "no-store" });
     return response.end(content);
   } catch (error) {

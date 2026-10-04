@@ -10,47 +10,159 @@ const canvas = $("#preview"); const ctx = canvas.getContext("2d");
 const fallback = { project: { name: "Git history", branch: "main" }, duration: 60, commits: [], groups: [], settings: { timeZone: "Asia/Shanghai", maxAuthors: 16 }, totalChurn: 0, authors: [], initialLines: 0, totalLines: 0 };
 let manifest = window.__GIT_MANIFEST__?.version === 2 ? window.__GIT_MANIFEST__ : fallback; manifest = { ...manifest, settings: { ...manifest.settings, locale } }; let time = 0; let playing = false; let lastFrame = 0;
 function render() { const nodes = drawHistory(ctx, manifest, time); currentChurn = nodes.reduce((sum,n)=>sum+n.churn,0); showDetail(); $("#scrub").value = time; $("#time-label").textContent = `${time.toFixed(1)}s / ${manifest.duration}s`; }
-function tick(now) { if (playing) { if (!lastFrame) lastFrame = now; time += (now - lastFrame) / 1000; if (time >= manifest.duration) { time = manifest.duration; playing = false; $("#play").textContent = tr('play'); } lastFrame = now; render(); } else lastFrame = 0; requestAnimationFrame(tick); }
+function tick(now) { if (playing) { if (!lastFrame) lastFrame = now; time += (now - lastFrame) / 1000; if (time >= manifest.duration) { time = manifest.duration; playing = false; $("#play").textContent = tr('play'); } lastFrame = now; syncAudio(); render(); } else lastFrame = 0; requestAnimationFrame(tick); }
 const messages = new Map();
-let exportFile = null, accountsDirty = false;
+let exportFile = null, accountsDirty = false, previousExport = false;
+let statusLoading = true, exportRequestPending = false, recoveringExport = false, observedTaskId = null, observedTaskStage = null;
+let audioRestoring = false;
+const audioStorageKey = 'git-history-audio';
 let selectedAudio = null, audioLoading = false, exporting = false;
+const previewAudio = document.createElement('audio');
+previewAudio.preload = 'auto'; previewAudio.loop = true;
+$('#player').append(previewAudio);
+function syncAudio(seek = false) {
+  if (!playing) previewAudio.pause();
+  if (!selectedAudio || previewAudio.readyState < 1) return;
+  const target = time % previewAudio.duration;
+  if (seek || Math.abs(previewAudio.currentTime - target) > 0.15) previewAudio.currentTime = target;
+}
+function playAudio() {
+  if (!selectedAudio) return;
+  syncAudio(true);
+  const source = previewAudio.src;
+  previewAudio.play().catch(error => {
+    if (error.name === 'AbortError' || source !== previewAudio.src || !playing) return;
+    playing = false; lastFrame = 0; previewAudio.pause();
+    $('#play').textContent = tr('play');
+    setMessage($('#player-status'), () => tr('audioPreviewFailed'));
+  });
+}
+previewAudio.addEventListener('loadedmetadata', () => syncAudio(true));
+
+function warnBeforeLeave(event) { event.preventDefault(); event.returnValue = ''; }
 function updateAudioControls() {
-  $('#audio-file').disabled = audioLoading || exporting;
-  $('#choose-audio').disabled = audioLoading || exporting;
-  $('#clear-audio').disabled = audioLoading || exporting || !selectedAudio;
-  $('#match-audio-duration').disabled = audioLoading || exporting || generating || !selectedAudio || selectedAudio.duration < 15 || selectedAudio.duration > 180;
-  $('#export').disabled = exporting || audioLoading || accountsDirty || manifest.version !== 2;
+  if (exporting) window.addEventListener('beforeunload', warnBeforeLeave);
+  else window.removeEventListener('beforeunload', warnBeforeLeave);
+  $('#audio-file').disabled = audioLoading || audioRestoring || exporting;
+  $('#choose-audio').disabled = audioLoading || audioRestoring || exporting;
+  $('#clear-audio').disabled = audioLoading || audioRestoring || exporting || !selectedAudio;
+  $('#match-audio-duration').disabled = audioLoading || audioRestoring || exporting || generating || !selectedAudio || selectedAudio.duration < 15 || selectedAudio.duration > 180;
+  $('#export').disabled = statusLoading || exporting || audioLoading || audioRestoring || accountsDirty || manifest.version !== 2;
+}
+function saveAudioSelection() {
+  try {
+    if (selectedAudio) sessionStorage.setItem(audioStorageKey, JSON.stringify({ id: selectedAudio.id, name: selectedAudio.name }));
+    else sessionStorage.removeItem(audioStorageKey);
+  } catch {}
+}
+function showAudioSelection() {
+  const audio = selectedAudio;
+  setMessage($('#audio-status'), () => tr('audioSelected', { name: audio.name, duration: audio.duration.toFixed(2) }) + (audio.duration < 15 || audio.duration > 180 ? ` ${tr('audioDurationRange')}` : ''));
+}
+function resetAudio(expired = false) {
+  selectedAudio = null; audioRestoring = false; saveAudioSelection();
+  previewAudio.pause(); previewAudio.removeAttribute('src'); previewAudio.load();
+  setMessage($('#player-status'), () => '');
+  setMessage($('#audio-status'), () => tr(expired ? 'error.audioMissing' : 'audioHelp'));
+  updateAudioControls();
+}
+async function restoreAudio() {
+  let stored;
+  try { stored = JSON.parse(sessionStorage.getItem(audioStorageKey)); } catch { resetAudio(); return; }
+  if (!stored?.id) { resetAudio(); return; }
+  audioRestoring = true; updateAudioControls();
+  try {
+    const result = await (await fetch(`/api/audio/${encodeURIComponent(stored.id)}`)).json();
+    if (!result.ok) {
+      if (result.errorCode === 'error.audioMissing') { resetAudio(true); return; }
+      throw apiError(result);
+    }
+    selectedAudio = { id: result.id, duration: result.duration, name: stored.name };
+    previewAudio.src = `/api/audio/${encodeURIComponent(result.id)}/file`;
+    audioRestoring = false; showAudioSelection(); updateAudioControls();
+    if (playing) playAudio();
+  } catch {
+    setMessage($('#audio-status'), () => tr('audioRecovering'));
+    setTimeout(restoreAudio, 1000);
+  }
+}
+function showTask(task) {
+  exportFile = null; previousExport = true;
+  exporting = ['preparing', 'rendering', 'encoding'].includes(task.stage);
+  if (task.stage === 'preparing') setMessage($('#export-status'), () => tr('exportPreparing'));
+  else if (task.stage === 'rendering') setMessage($('#export-status'), () => tr('exportFrames', { done: task.frame, total: task.total, percent: Math.floor(task.frame / task.total * 100) }));
+  else if (task.stage === 'encoding') setMessage($('#export-status'), () => tr('exportEncoding', { done: task.frame, total: task.total }));
+  else if (task.stage === 'complete') {
+    setMessage($('#export-status'), () => `${tr('previousExportComplete')} `);
+    exportFile = task.file; showExportLink();
+  } else {
+    setMessage($('#export-status'), () => tr('exportFailed', { error: tr(task.errorCode || 'error.unknown', task.errorParams) }));
+    if (task.errorCode === 'error.audioMissing' && task.audioId === selectedAudio?.id) resetAudio(true);
+  }
+}
+async function refreshExportStatus() {
+  try {
+    if (exportRequestPending) return;
+    const result = await (await fetch('/api/export/status')).json();
+    if (!result.ok) throw apiError(result);
+    if (exportRequestPending) return;
+    const wasLoading = statusLoading;
+    statusLoading = false;
+    if (result.task && (result.task.id !== observedTaskId || result.task.stage !== observedTaskStage || exporting || recoveringExport || wasLoading)) {
+      observedTaskId = result.task.id; observedTaskStage = result.task.stage; showTask(result.task);
+    } else if (!result.task && recoveringExport) {
+      exporting = false;
+      setMessage($('#export-status'), () => tr('exportFailed', { error: tr('exportInterrupted') }));
+    }
+    if (!result.task && wasLoading && !recoveringExport) setMessage($('#export-status'), () => '');
+    recoveringExport = false;
+    updateAudioControls();
+  } catch {
+    statusLoading = true;
+    setMessage($('#export-status'), () => tr('exportRecovering'));
+    updateAudioControls();
+  } finally { setTimeout(refreshExportStatus, 1000); }
 }
 async function handleAudioFile() {
   const file = $('#audio-file').files[0];
-  if (!file) return;
+  if (!file || audioRestoring || exporting) return;
   audioLoading = true; updateAudioControls();
   setMessage($('#audio-status'), () => tr('audioLoading'));
   try {
     if (file.size > 100 * 1024 * 1024) throw new AppError('error.audioTooLarge');
-    const response = await fetch('/api/audio', { method: 'POST', body: file });
+    const response = await fetch('/api/audio', { method: 'POST', headers: { 'content-type': file.type || 'application/octet-stream' }, body: file });
     const result = await response.json();
     if (!result.ok) throw apiError(result);
     const previous = selectedAudio;
     selectedAudio = { id: result.id, duration: result.duration, name: file.name };
+    previewAudio.pause();
+    previewAudio.src = `/api/audio/${encodeURIComponent(result.id)}/file`;
+    saveAudioSelection();
+    setMessage($('#player-status'), () => '');
+    if (playing) playAudio();
     if (previous) await fetch(`/api/audio/${previous.id}`, { method: 'DELETE' }).catch(console.error);
-    const audio = selectedAudio;
-    setMessage($('#audio-status'), () => tr('audioSelected', { name: audio.name, duration: audio.duration.toFixed(2) }) + (audio.duration < 15 || audio.duration > 180 ? ` ${tr('audioDurationRange')}` : ''));
+    showAudioSelection();
   } catch (error) {
     setMessage($('#audio-status'), () => tr('audioFailed', { error: errorMessage(error) }) + (selectedAudio ? ` ${tr('audioSelected', { name: selectedAudio.name, duration: selectedAudio.duration.toFixed(2) })}` : ''));
   } finally { $('#audio-file').value = ''; audioLoading = false; updateAudioControls(); }
 }
 async function handleClearAudio() {
-  const audio = selectedAudio; selectedAudio = null;
-  setMessage($('#audio-status'), () => tr('audioHelp')); updateAudioControls();
-  if (audio) await fetch(`/api/audio/${audio.id}`, { method: 'DELETE' }).catch(console.error);
+  if (exporting || audioRestoring || !selectedAudio) return;
+  audioLoading = true; updateAudioControls();
+  try {
+    const result = await (await fetch(`/api/audio/${selectedAudio.id}`, { method: 'DELETE' })).json();
+    if (!result.ok) throw apiError(result);
+    resetAudio();
+  } catch (error) {
+    setMessage($('#audio-status'), () => tr('audioFailed', { error: errorMessage(error) }));
+  } finally { audioLoading = false; updateAudioControls(); }
 }
 function handleMatchAudioDuration() {
   if (!selectedAudio || $('#match-audio-duration').disabled) return;
   const duration = selectedAudio.duration;
   $('#duration').value = duration;
   manifest = { ...manifest, duration, commits: normalizedTimeline(manifest.commits, duration) };
-  playing = false; lastFrame = 0; time = 0;
+  playing = false; lastFrame = 0; time = 0; syncAudio(true);
   $('#play').textContent = tr('play'); $('#scrub').max = duration;
   exportFile = null; setMessage($('#export-status'), () => '');
   render();
@@ -66,14 +178,50 @@ function errorMessage(error) {
 }
 function showExportLink() {
   if (!exportFile) return;
-  const link = document.createElement('a'); link.href = exportFile; link.download = ''; link.textContent = tr('downloadVideo');
+  const link = document.createElement('a'); link.href = exportFile; link.download = ''; link.textContent = tr(previousExport ? 'downloadPreviousVideo' : 'downloadVideo');
   $('#export-status').append(link);
+}
+const commonTimeZones = ['Asia/Shanghai', 'UTC', 'Asia/Tokyo', 'Europe/London', 'America/New_York'];
+const timeZoneCities = { 'Asia/Shanghai': 'timeZoneBeijing', 'UTC': 'timeZoneUTC', 'Asia/Tokyo': 'timeZoneTokyo', 'Europe/London': 'timeZoneLondon', 'America/New_York': 'timeZoneNewYork' };
+const localTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+let timeZoneOptions = [];
+function updateTimeZones(selected = $('#time-zone').value || localTimeZone) {
+  try { new Intl.DateTimeFormat(locale, { timeZone: selected }); } catch { selected = localTimeZone; }
+  const zones = [...new Set([...commonTimeZones, ...Intl.supportedValuesOf('timeZone'), selected])];
+  const now = new Date();
+  timeZoneOptions = zones.map(id => {
+    const city = timeZoneCities[id] ? tr(timeZoneCities[id]) : id.split('/').at(-1).replaceAll('_', ' ');
+    const offsetName = new Intl.DateTimeFormat('en', { timeZone: id, timeZoneName: 'shortOffset' }).formatToParts(now).find(part => part.type === 'timeZoneName').value;
+    const match = /^GMT([+-])(\d+)(?::(\d+))?$/.exec(offsetName);
+    const offset = match ? `UTC${match[1]}${match[2].padStart(2, '0')}:${(match[3] || '00').padStart(2, '0')}` : 'UTC+00:00';
+    return { id, label: `${city} · ${offset} · ${id}`, common: commonTimeZones.includes(id), search: `${city} ${id.replaceAll('_', ' ')} ${id} ${offset} ${id === 'Asia/Shanghai' ? '上海 Beijing Shanghai' : ''}`.toLowerCase() };
+  });
+  filterTimeZones(selected);
+}
+function filterTimeZones(selected = $('#time-zone').value) {
+  const query = $('#time-zone-search').value.trim().toLowerCase();
+  const matches = timeZoneOptions.filter(option => option.search.includes(query));
+  const select = $('#time-zone'); select.replaceChildren();
+  const addGroup = (label, options) => {
+    if (!options.length) return;
+    const group = document.createElement('optgroup'); group.label = tr(label);
+    for (const option of options) group.append(new Option(option.label, option.id));
+    select.append(group);
+  };
+  if (!matches.some(option => option.id === selected)) addGroup('timeZoneSelected', timeZoneOptions.filter(option => option.id === selected));
+  addGroup('timeZoneCommon', matches.filter(option => option.common));
+  addGroup('timeZoneAll', matches.filter(option => !option.common));
+  select.value = selected;
+  select.title = select.selectedOptions[0]?.textContent || '';
+  $('#time-zone-results').hidden = !query;
+  setMessage($('#time-zone-results'), () => tr(matches.length ? 'timeZoneMatches' : 'timeZoneNoMatches', { count: matches.length }));
 }
 function changeLanguage() {
   locale = normalizeLocale($('#language').value);
   try { localStorage.setItem('git-history-locale', locale); } catch {}
   manifest = { ...manifest, settings: { ...manifest.settings, locale } };
   applyTranslations(document, locale);
+  updateTimeZones();
   for (const [element, render] of messages) element.textContent = render();
   showExportLink(); showAccounts(); showSummary(); showFullscreen(); updateBranchControls();
   $('#play').textContent = tr(playing ? 'pause' : 'play');
@@ -292,10 +440,10 @@ async function handleGenerate(event) {
     loadedSource = source;
     accountsDirty = false; draftLinks = accountLinks(manifest.authors,manifest.settings.accountLinks);
     showAccounts();
-    selectedAuthor = null; playing = false; lastFrame = 0; time = 0;
+    selectedAuthor = null; playing = false; lastFrame = 0; time = 0; syncAudio(true);
     $("#play").textContent = tr('play');
     $("#scrub").max = manifest.duration;
-    $("#export").disabled = false;
+    updateAudioControls();
     const cacheText = () => result.analysis?.cacheHit ? tr('cacheHit') : result.analysis?.incremental ? tr('incrementalAnalysis', { count: result.analysis.analyzedEvents }) : tr('fullAnalysis');
     setMessage($("#status"), () => tr('analysisComplete', { count: manifest.commits.length, cache: cacheText() }));
     showSummary(); showHeading(); render();
@@ -307,6 +455,7 @@ function handleSeek() {
   playing = false;
   $("#play").textContent = tr('play');
   time = Number($("#scrub").value);
+  lastFrame = 0; syncAudio(true);
   render();
 }
 function handlePlay() {
@@ -314,10 +463,12 @@ function handlePlay() {
   playing = !playing;
   lastFrame = 0;
   $("#play").textContent = playing ? tr('pause') : tr('play');
+  if (playing) { setMessage($('#player-status'), () => ''); playAudio(); }
+  else syncAudio(true);
 }
 async function handleExport() {
-  if (exporting || audioLoading || accountsDirty) return;
-  exportFile = null;
+  if (statusLoading || exporting || audioLoading || audioRestoring || accountsDirty) return;
+  exportFile = null; previousExport = false; recoveringExport = false; exportRequestPending = true;
   exporting = true; updateAudioControls(); setMessage($("#export-status"), () => tr('exportPreparing'));
   try {
     const response = await fetch("/api/export", { method: "POST", headers: { "content-type": "application/json", accept: "application/x-ndjson" }, body: JSON.stringify({ manifest, audioId: selectedAudio?.id }) });
@@ -326,6 +477,7 @@ async function handleExport() {
       const result = await response.json(); if (!result.ok) throw apiError(result); file = result.file;
     } else {
       await readEvents(response, event => {
+        if (event.type === 'start' && event.taskId) { observedTaskId = event.taskId; observedTaskStage = 'preparing'; }
         if (event.type === 'start') setMessage($("#export-status"), () => tr('exportPreparing'));
         else if (event.type === 'progress') setMessage($("#export-status"), () => event.frame === event.total ? tr('exportEncoding', { done: event.frame, total: event.total }) : tr('exportFrames', { done: event.frame, total: event.total, percent: Math.floor(event.frame / event.total * 100) }));
         else if (event.type === 'complete') file = event.file;
@@ -334,21 +486,35 @@ async function handleExport() {
     }
     if (!file) throw new AppError('exportInterrupted');
     setMessage($('#export-status'), () => `${tr('exportComplete')} `);
-    exportFile = file; showExportLink();
-  } catch (error) { setMessage($("#export-status"), () => tr('exportFailed', { error: errorMessage(error) })); }
-  finally { exporting = false; updateAudioControls(); }
+    exportFile = file; observedTaskStage = 'complete'; showExportLink();
+  } catch (error) {
+    if (error instanceof AppError && error.code !== 'exportInterrupted' && error.code !== 'error.exportBusy') {
+      if (error.code === 'error.audioMissing') resetAudio(true);
+      setMessage($('#export-status'), () => tr('exportFailed', { error: errorMessage(error) }));
+    } else {
+      recoveringExport = true; statusLoading = true;
+      setMessage($('#export-status'), () => tr('exportRecovering'));
+    }
+  } finally {
+    exportRequestPending = false;
+    if (!recoveringExport) exporting = false;
+    updateAudioControls();
+  }
 }
 applyTranslations(document, locale);
 if (manifest.version === 2) {
   $("#source").value = manifest.project.source?.startsWith("http") ? "" : manifest.project.repo || "";
   if (manifest.project.source?.startsWith("http")) $("#remote-source").value = manifest.project.source;
   $("#duration").value = manifest.duration;
-  $("#time-zone").value = manifest.settings.timeZone;
+  updateTimeZones(manifest.settings.timeZone);
   $("#max-authors").value = manifest.settings.maxAuthors;
   $("#scrub").max = manifest.duration;
-  $("#export").disabled = false;
+  updateAudioControls();
   setMessage($("#status"), () => manifest.commits.length ? tr('loaded') : tr('chooseRepository'));
 }
+if (manifest.version !== 2) updateTimeZones();
+$('#time-zone-search').addEventListener('input', () => filterTimeZones());
+$('#time-zone').addEventListener('change', () => { $('#time-zone-search').value = ''; filterTimeZones(); });
 $('#language').value = locale;
 $('#language').addEventListener('change', changeLanguage);
 $('#fullscreen').addEventListener('click', handleFullscreen);
@@ -379,3 +545,6 @@ showHeading(); render(); showSummary(); showAccounts(); requestAnimationFrame(ti
 
 updateBranchControls();
 if ($("#source").value.trim() && !$("#remote-source").value.trim()) handleReadBranches();
+
+restoreAudio();
+refreshExportStatus();
