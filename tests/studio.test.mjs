@@ -54,6 +54,54 @@ test('file URLs show startup guidance, disable controls and never load the Studi
   assert(!requests.some(url=>url.endsWith('/src/studio.js')));
 });
 
+test('local soundtrack selection matches the current timeline, preserves totals and removes audio', { timeout: 30000 }, async t => {
+  const f = await studioFixture(t), page = f.page;
+  writeFileSync(join(f.repo, 'second.js'), 'two\n'); f.git('add', '.'); f.git('commit', '-m', 'second');
+  await page.goto(f.origin); await f.select(f.repo);
+  const manifest = await f.generate();
+  const audio = join(f.dir, '配乐.wav');
+  execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=18.25', audio]);
+  await page.locator('#audio-options').evaluate(el => { el.open = true; });
+  await page.locator('#audio-file').setInputFiles(audio);
+  await page.waitForFunction(() => !document.querySelector('#match-audio-duration').disabled);
+  assert.match(await page.locator('#audio-status').textContent(), /配乐.wav.*18.25/);
+  await page.locator('#match-audio-duration').click();
+  assert.equal(await page.locator('#duration').inputValue(), '18.25');
+  assert.equal(await page.locator('#scrub').getAttribute('max'), '18.25');
+  await page.locator('#scrub').evaluate(el => { el.value = el.max; el.dispatchEvent(new Event('input')); });
+  assert.equal(await page.locator('#summary strong').first().textContent(), String(manifest.totalChurn));
+  let submitted;
+  await page.route('**/api/export', route => {
+    submitted = route.request().postDataJSON();
+    return route.fulfill({ json: { ok: true, file: '/exports/test.mp4' } });
+  });
+  await page.locator('#export').click(); await page.locator('#export-status a').waitFor();
+  assert.equal(submitted.manifest.duration, 18.25); assert(submitted.audioId);
+  assert.equal(historyState(submitted.manifest, 18.25).churn, manifest.totalChurn);
+  assert.equal(historyState(submitted.manifest, 18.25).retainedLines, manifest.retention.mappedLines);
+  const invalidFile = join(f.dir, 'invalid.wav'); writeFileSync(invalidFile, 'not audio');
+  await page.locator('#audio-file').setInputFiles(invalidFile);
+  await page.waitForFunction(() => document.querySelector('#audio-status').textContent.includes('音频未更换'));
+  assert(!(await page.locator('#clear-audio').isDisabled()));
+  await page.locator('#export').click(); await page.locator('#export-status a').waitFor();
+  assert(submitted.audioId);
+  await page.locator('#audio-file').setInputFiles(audio);
+  await page.waitForFunction(() => !document.querySelector('#match-audio-duration').disabled);
+  await page.locator('#export').click(); await page.locator('#export-status a').waitFor();
+  await page.locator('#language').selectOption('en');
+  assert.match(await page.locator('#audio-status').textContent(), /18.25 seconds/);
+  const id = submitted.audioId;
+  const deletion = page.waitForResponse(response => response.request().method() === 'DELETE' && response.url().endsWith(id));
+  await page.locator('#clear-audio').click(); await deletion;
+  assert(await page.locator('#match-audio-duration').isDisabled());
+  await page.locator('#export').click(); await page.locator('#export-status a').waitFor();
+  assert.equal(submitted.audioId, undefined);
+  const invalid = await fetch(`${f.origin}/api/audio`, { method: 'POST', body: 'not audio' });
+  assert.equal(invalid.status, 400); assert.equal((await invalid.json()).errorCode, 'error.invalidAudio');
+  const missing = await fetch(`${f.origin}/api/export`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ manifest, audioId: id }) });
+  assert.equal(missing.status, 400); assert.equal((await missing.json()).errorCode, 'error.audioMissing');
+});
+
 test('typed local paths preserve Unicode and spaces, clear remote URLs and omit tokens',{timeout:20000},async(t)=>{
   const f=await studioFixture(t),repo=join(f.dir,'中文 仓库');
   execFileSync('git',['clone',f.repo,repo],{stdio:'pipe'});

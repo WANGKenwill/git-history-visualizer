@@ -1,8 +1,11 @@
 import { AppError, t, normalizeLocale } from '../src/i18n.js';
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { execFile, execFileSync } from "node:child_process";
 import { createServer } from "node:http";
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { basename, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { repositoryInfo, requireFullHistory } from "./repository.mjs";
@@ -16,12 +19,37 @@ const manifestCacheDir = join(root, ".cache", "manifests");
 const dataDir = join(root, ".cache", "current");
 const browserAssets = new Set([
   "/studio.html", "/index.html", "/data/manifest.js",
-  "/src/i18n.js", "/src/studio.js", "/src/visualizer.js", "/src/motion.js", "/src/accounts.js",
+  "/src/i18n.js", "/src/studio.js", "/src/visualizer.js", "/src/motion.js", "/src/accounts.js", "/src/timeline.js",
 ]);
 mkdirSync(cacheDir, { recursive: true });
 mkdirSync(exportDir, { recursive: true });
 mkdirSync(manifestCacheDir, { recursive: true });
 mkdirSync(dataDir, { recursive: true });
+const audioDir = mkdtempSync(join(tmpdir(), 'git-history-audio-'));
+const audioFiles = new Map();
+process.once('exit', () => rmSync(audioDir, { recursive: true, force: true }));
+for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => process.exit(0));
+
+async function uploadAudio(request) {
+  const id = randomUUID(), path = join(audioDir, id);
+  let bytes = 0;
+  try {
+    await pipeline(request, new Transform({ transform(chunk, encoding, done) {
+      bytes += chunk.length;
+      done(bytes > 100 * 1024 * 1024 ? new AppError('error.audioTooLarge') : null, chunk);
+    } }), createWriteStream(path));
+    const probe = await new Promise((done, reject) => {
+      execFile('ffprobe', ['-v', 'error', '-protocol_whitelist', 'file,pipe', '-select_streams', 'a:0', '-show_entries', 'stream=codec_type,duration:format=duration', '-of', 'json', path], { encoding: 'utf8', timeout: 15_000 }, (error, stdout) => {
+        if (error) return reject(new AppError(error.code === 'ENOENT' ? 'error.ffprobeMissing' : 'error.invalidAudio'));
+        try { done(JSON.parse(stdout)); } catch { reject(new AppError('error.invalidAudio')); }
+      });
+    });
+    const duration = Number(probe.streams?.[0]?.duration || probe.format?.duration);
+    if (probe.streams?.[0]?.codec_type !== 'audio' || !Number.isFinite(duration) || duration <= 0) throw new AppError('error.invalidAudio');
+    audioFiles.set(id, path);
+    return { id, duration };
+  } catch (error) { rmSync(path, { force: true }); throw error; }
+}
 
 function errorPayload(error) {
   console.error(error);
@@ -185,6 +213,14 @@ let exporting = false, analyzing = false;
 const server = createServer(async (request, response) => {
   try {
     const url = new URL(request.url, "http://localhost");
+    if (request.method === "POST" && url.pathname === "/api/audio") {
+      return json(response, 200, { ok: true, ...await uploadAudio(request) });
+    }
+    if (request.method === "DELETE" && url.pathname.startsWith("/api/audio/")) {
+      const id = url.pathname.slice('/api/audio/'.length), path = audioFiles.get(id);
+      if (path) { rmSync(path, { force: true }); audioFiles.delete(id); }
+      return json(response, 200, { ok: true });
+    }
     if (request.method === "GET" && url.pathname === "/api/pick-local") {
       const path = await pickLocalDirectory(normalizeLocale(request.headers["accept-language"]?.split(",")[0]));
       return json(response, 200, path ? { ok: true, path } : { ok: false, cancelled: true });
@@ -226,7 +262,9 @@ const server = createServer(async (request, response) => {
       const streaming = request.headers.accept?.includes("application/x-ndjson");
       const send = event => { if (!response.destroyed) response.write(`${JSON.stringify(event)}\n`); };
       try {
-        const { manifest } = await readBody(request, 64 * 1024 * 1024);
+        const { manifest, audioId } = await readBody(request, 64 * 1024 * 1024);
+        const audioPath = audioId ? audioFiles.get(audioId) : undefined;
+        if (audioId && !audioPath) throw new AppError('error.audioMissing');
         if (manifest?.version !== 2 || !Array.isArray(manifest.commits) || !Array.isArray(manifest.authors)) throw new AppError('error.invalidManifest');
         if (!(manifest.duration > 0 && Number.isFinite(manifest.duration))) throw new AppError('error.invalidDuration');
         const output = join(exportDir, `git-history-${Date.now()}.mp4`);
@@ -235,7 +273,7 @@ const server = createServer(async (request, response) => {
           response.writeHead(200, { "content-type": "application/x-ndjson; charset=utf-8", "cache-control": "no-store" });
           send({ type: "start" });
         }
-        await exportVideo({ manifest, output, onProgress: (frame, total) => {
+        await exportVideo({ manifest, output, audioPath, onProgress: (frame, total) => {
           if (!streaming) return;
           const now = performance.now();
           if (frame === 1 || frame === total || now - lastProgress >= 250) {

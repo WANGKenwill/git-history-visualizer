@@ -62,6 +62,8 @@ Regular repositories, Git worktrees, and bare repositories are supported. For sh
 
 Videos are saved to `exports/` as 1920×1080, 30 fps, H.264 MP4 files. Preview and export share the same drawing function, and the final frame shows complete cumulative totals. Only one export runs at a time.
 
+Expand **Add soundtrack** to choose local audio (maximum 100 MB; MP3, WAV, M4A and other formats readable by local FFmpeg). The filename and duration are shown. Shorter audio loops; longer audio is trimmed; the MP4 includes an AAC track. Without audio, exports remain silent. **Match video duration to audio** (15–180 seconds) immediately adjusts the current preview and export timeline without reanalyzing the repository. Audio is for export only; preview remains silent. Files are temporarily stored locally and cleaned up when removed, replaced, or the server exits. Select audio again after refreshing the page.
+
 ## What the statistics mean
 
 - Only non-merge commits reachable from the selected branch HEAD are counted, deduplicated by SHA. Change volume = added lines + deleted lines.
@@ -87,6 +89,8 @@ The bundled demo is pinned to DSH's `master` commit [`5badb150`](https://github.
 npm run check       # Statistics, UI, and video export tests
 npm run licenses    # Update third-party license notices
 ```
+
+Exports render each frame at a fixed timestamp and send raw Canvas pixels to FFmpeg over a local connection, avoiding PNG compression, Base64 transfer, and PNG decoding. Browser Content Security Policy restricts resources and connections to the same origin; export does not access external networks.
 
 Tests require Chromium and FFmpeg to be installed. CLI usage is also available:
 

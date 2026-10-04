@@ -98,7 +98,7 @@
             <button id="retry-branches" type="button" class="secondary" data-i18n="retryBranches">重新读取分支</button>
           </div>
           <label for="duration" data-i18n="duration">视频时长（秒）</label>
-          <input id="duration" type="number" min="15" max="180" value="60" />
+          <input id="duration" type="number" min="15" max="180" step="any" value="60" />
           <label for="time-zone" data-i18n="timeZone">提交时区</label>
           <input id="time-zone" value="Asia/Shanghai" />
           <label for="max-authors" data-i18n="maxAuthors">显示作者人数（其余汇总）</label>
@@ -120,6 +120,13 @@
           <div id="export-status" role="status"></div>
           <div id="player-status" role="status"></div>
         </section>
+        <details id="audio-options">
+          <summary data-i18n="audioHeading">添加配乐（可选）</summary>
+          <input id="audio-file" type="file" hidden accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac" />
+          <div class="toolbar"><button id="choose-audio" class="secondary" data-i18n="audioFile">选择本地音频</button></div>
+          <p id="audio-status" role="status" class="lede" data-i18n="audioHelp">仅用于 MP4 导出；音频自动循环，到视频结束时截断。最大 100 MB。</p>
+          <div class="toolbar"><button id="match-audio-duration" class="secondary" disabled data-i18n="matchAudioDuration">视频时长设为音频时长</button><button id="clear-audio" class="secondary" disabled data-i18n="clearAudio">移除音频</button></div>
+        </details>
         <section class="overview" aria-label="项目概览" data-i18n-aria-label="overview">
           <h2 data-i18n="overview">项目概览</h2><div id="summary" class="summary"></div>
           <details id="statistics-details"><summary data-i18n="statistics">统计详情</summary><p id="extra-stats"></p><p class="lede" data-i18n="statisticsHelp">改动量不等于贡献质量；合并提交与冲突解决改动不单独计入。Squash 仅展示保留的提交和作者。</p></details>

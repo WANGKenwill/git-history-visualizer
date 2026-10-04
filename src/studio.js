@@ -1,6 +1,7 @@
 import { t, normalizeLocale, preferredLocale, applyTranslations, AppError } from './i18n.js';
 import { drawHistory, hitAuthor, prepareHistory, historyState } from "./visualizer.js";
 import { accountLinks, changeAccount } from "./accounts.js";
+import { normalizedTimeline } from './timeline.js';
 let locale = preferredLocale();
 const tr = (key, params) => t(locale, key, params);
 const number = value => new Intl.NumberFormat(locale).format(value);
@@ -12,6 +13,48 @@ function render() { const nodes = drawHistory(ctx, manifest, time); currentChurn
 function tick(now) { if (playing) { if (!lastFrame) lastFrame = now; time += (now - lastFrame) / 1000; if (time >= manifest.duration) { time = manifest.duration; playing = false; $("#play").textContent = tr('play'); } lastFrame = now; render(); } else lastFrame = 0; requestAnimationFrame(tick); }
 const messages = new Map();
 let exportFile = null, accountsDirty = false;
+let selectedAudio = null, audioLoading = false, exporting = false;
+function updateAudioControls() {
+  $('#audio-file').disabled = audioLoading || exporting;
+  $('#choose-audio').disabled = audioLoading || exporting;
+  $('#clear-audio').disabled = audioLoading || exporting || !selectedAudio;
+  $('#match-audio-duration').disabled = audioLoading || exporting || generating || !selectedAudio || selectedAudio.duration < 15 || selectedAudio.duration > 180;
+  $('#export').disabled = exporting || audioLoading || accountsDirty || manifest.version !== 2;
+}
+async function handleAudioFile() {
+  const file = $('#audio-file').files[0];
+  if (!file) return;
+  audioLoading = true; updateAudioControls();
+  setMessage($('#audio-status'), () => tr('audioLoading'));
+  try {
+    if (file.size > 100 * 1024 * 1024) throw new AppError('error.audioTooLarge');
+    const response = await fetch('/api/audio', { method: 'POST', body: file });
+    const result = await response.json();
+    if (!result.ok) throw apiError(result);
+    const previous = selectedAudio;
+    selectedAudio = { id: result.id, duration: result.duration, name: file.name };
+    if (previous) await fetch(`/api/audio/${previous.id}`, { method: 'DELETE' }).catch(console.error);
+    const audio = selectedAudio;
+    setMessage($('#audio-status'), () => tr('audioSelected', { name: audio.name, duration: audio.duration.toFixed(2) }) + (audio.duration < 15 || audio.duration > 180 ? ` ${tr('audioDurationRange')}` : ''));
+  } catch (error) {
+    setMessage($('#audio-status'), () => tr('audioFailed', { error: errorMessage(error) }) + (selectedAudio ? ` ${tr('audioSelected', { name: selectedAudio.name, duration: selectedAudio.duration.toFixed(2) })}` : ''));
+  } finally { $('#audio-file').value = ''; audioLoading = false; updateAudioControls(); }
+}
+async function handleClearAudio() {
+  const audio = selectedAudio; selectedAudio = null;
+  setMessage($('#audio-status'), () => tr('audioHelp')); updateAudioControls();
+  if (audio) await fetch(`/api/audio/${audio.id}`, { method: 'DELETE' }).catch(console.error);
+}
+function handleMatchAudioDuration() {
+  if (!selectedAudio || $('#match-audio-duration').disabled) return;
+  const duration = selectedAudio.duration;
+  $('#duration').value = duration;
+  manifest = { ...manifest, duration, commits: normalizedTimeline(manifest.commits, duration) };
+  playing = false; lastFrame = 0; time = 0;
+  $('#play').textContent = tr('play'); $('#scrub').max = duration;
+  exportFile = null; setMessage($('#export-status'), () => '');
+  render();
+}
 function setMessage(element, render) { messages.set(element, render); element.textContent = render(); }
 function apiError(result) {
   if (!result.errorCode) console.error(result.error);
@@ -117,6 +160,7 @@ function updateBranchControls() {
   $("#analyze").disabled = generating || completingHistory || !branchesReady || shallow;
   $("#branch").disabled = generating || completingHistory || !branchesReady;
   $("#read-branches").disabled = generating || completingHistory || readingBranches || (!$("#remote-source").value.trim() && !shallow);
+  updateAudioControls();
 }
 function clearBranches() {
   branchRequest++;
@@ -272,10 +316,11 @@ function handlePlay() {
   $("#play").textContent = playing ? tr('pause') : tr('play');
 }
 async function handleExport() {
+  if (exporting || audioLoading || accountsDirty) return;
   exportFile = null;
-  const button = $("#export"); button.disabled = true; setMessage($("#export-status"), () => tr('exportPreparing'));
+  exporting = true; updateAudioControls(); setMessage($("#export-status"), () => tr('exportPreparing'));
   try {
-    const response = await fetch("/api/export", { method: "POST", headers: { "content-type": "application/json", accept: "application/x-ndjson" }, body: JSON.stringify({ manifest }) });
+    const response = await fetch("/api/export", { method: "POST", headers: { "content-type": "application/json", accept: "application/x-ndjson" }, body: JSON.stringify({ manifest, audioId: selectedAudio?.id }) });
     let file;
     if (!response.headers.get('content-type')?.includes('application/x-ndjson')) {
       const result = await response.json(); if (!result.ok) throw apiError(result); file = result.file;
@@ -291,7 +336,7 @@ async function handleExport() {
     setMessage($('#export-status'), () => `${tr('exportComplete')} `);
     exportFile = file; showExportLink();
   } catch (error) { setMessage($("#export-status"), () => tr('exportFailed', { error: errorMessage(error) })); }
-  finally { button.disabled = false; }
+  finally { exporting = false; updateAudioControls(); }
 }
 applyTranslations(document, locale);
 if (manifest.version === 2) {
@@ -325,6 +370,10 @@ $("#form").addEventListener("submit", handleGenerate);
 $("#scrub").addEventListener("input", handleSeek);
 $("#play").addEventListener("click", handlePlay);
 $("#export").addEventListener("click", handleExport);
+$('#audio-file').addEventListener('change', handleAudioFile);
+$('#choose-audio').addEventListener('click', () => $('#audio-file').click());
+$('#clear-audio').addEventListener('click', handleClearAudio);
+$('#match-audio-duration').addEventListener('click', handleMatchAudioDuration);
 canvas.addEventListener("click", handleCanvasClick);
 showHeading(); render(); showSummary(); showAccounts(); requestAnimationFrame(tick);
 

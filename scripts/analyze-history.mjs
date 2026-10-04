@@ -2,6 +2,7 @@ import { AppError } from '../src/i18n.js';
 import { requireFullHistory } from './repository.mjs';
 import { analyzeRetention, numstatEntries } from './retention.mjs';
 import { accountLinks as normalizeAccountLinks } from '../src/accounts.js';
+import { normalizedTimeline } from '../src/timeline.js';
 import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { prepareHistory } from "../src/visualizer.js";
@@ -82,18 +83,6 @@ function makeAuthorMap(commits) {
     if (!aliases.has(id)) aliases.set(id, { id, name: commit.authorName, email: commit.authorEmail });
   }
   return [...aliases.values()].map((author) => ({ ...author, color: `hsl(${identityHash(author.id) % 360}, 78%, 68%)` }));
-}
-
-function normalizedTimeline(commits, duration) {
-  // Square-root gap compression preserves ordering without long inactive stretches.
-  const weights = commits.map((commit, index) => index ? Math.sqrt(Math.max(0, Date.parse(commit.authoredAt) - Date.parse(commits[index - 1].authoredAt))) : 0);
-  const total = weights.reduce((sum, weight) => sum + weight, 0);
-  let elapsed = 0;
-  return commits.map((commit, index) => {
-    elapsed += weights[index];
-    const fraction = total ? elapsed / total : index / Math.max(1, commits.length - 1);
-    return { ...commit, at: 0.6 + fraction * Math.max(0, duration - 3.6) };
-  });
 }
 
 export async function analyzeHistory({ repo, branch = "main", excludes = DEFAULT_EXCLUDES, duration = 60, projectName = "Git history", previousManifest = null, timeZone = "Asia/Shanghai", maxAuthors = 16, accountLinks, onProgress = () => {} }) {
