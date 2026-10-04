@@ -11,7 +11,7 @@ async function studioFixture(t) {
   const f=await serverFixture(t);
   const browser=await chromium.launch({headless:true});
   t.after(()=>browser.close());
-  const context=await browser.newContext();
+  const context=await browser.newContext({locale:"zh-CN"});
   const page=await context.newPage();
   await page.addInitScript(()=>{
     const realFetch=window.fetch;
@@ -54,6 +54,54 @@ test('file URLs show startup guidance, disable controls and never load the Studi
   assert(!requests.some(url=>url.endsWith('/src/studio.js')));
 });
 
+test('local soundtrack selection matches the current timeline, preserves totals and removes audio', { timeout: 30000 }, async t => {
+  const f = await studioFixture(t), page = f.page;
+  writeFileSync(join(f.repo, 'second.js'), 'two\n'); f.git('add', '.'); f.git('commit', '-m', 'second');
+  await page.goto(f.origin); await f.select(f.repo);
+  const manifest = await f.generate();
+  const audio = join(f.dir, '配乐.wav');
+  execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=18.25', audio]);
+  await page.locator('#audio-options').evaluate(el => { el.open = true; });
+  await page.locator('#audio-file').setInputFiles(audio);
+  await page.waitForFunction(() => !document.querySelector('#match-audio-duration').disabled);
+  assert.match(await page.locator('#audio-status').textContent(), /配乐.wav.*18.25/);
+  await page.locator('#match-audio-duration').click();
+  assert.equal(await page.locator('#duration').inputValue(), '18.25');
+  assert.equal(await page.locator('#scrub').getAttribute('max'), '18.25');
+  await page.locator('#scrub').evaluate(el => { el.value = el.max; el.dispatchEvent(new Event('input')); });
+  assert.equal(await page.locator('#summary strong').first().textContent(), String(manifest.totalChurn));
+  let submitted;
+  await page.route('**/api/export', route => {
+    submitted = route.request().postDataJSON();
+    return route.fulfill({ json: { ok: true, file: '/exports/test.mp4' } });
+  });
+  await page.locator('#export').click(); await page.locator('#export-status a').waitFor();
+  assert.equal(submitted.manifest.duration, 18.25); assert(submitted.audioId);
+  assert.equal(historyState(submitted.manifest, 18.25).churn, manifest.totalChurn);
+  assert.equal(historyState(submitted.manifest, 18.25).retainedLines, manifest.retention.mappedLines);
+  const invalidFile = join(f.dir, 'invalid.wav'); writeFileSync(invalidFile, 'not audio');
+  await page.locator('#audio-file').setInputFiles(invalidFile);
+  await page.waitForFunction(() => document.querySelector('#audio-status').textContent.includes('音频未更换'));
+  assert(!(await page.locator('#clear-audio').isDisabled()));
+  await page.locator('#export').click(); await page.locator('#export-status a').waitFor();
+  assert(submitted.audioId);
+  await page.locator('#audio-file').setInputFiles(audio);
+  await page.waitForFunction(() => !document.querySelector('#match-audio-duration').disabled);
+  await page.locator('#export').click(); await page.locator('#export-status a').waitFor();
+  await page.locator('#language').selectOption('en');
+  assert.match(await page.locator('#audio-status').textContent(), /18.25 seconds/);
+  const id = submitted.audioId;
+  const deletion = page.waitForResponse(response => response.request().method() === 'DELETE' && response.url().endsWith(id));
+  await page.locator('#clear-audio').click(); await deletion;
+  assert(await page.locator('#match-audio-duration').isDisabled());
+  await page.locator('#export').click(); await page.locator('#export-status a').waitFor();
+  assert.equal(submitted.audioId, undefined);
+  const invalid = await fetch(`${f.origin}/api/audio`, { method: 'POST', body: 'not audio' });
+  assert.equal(invalid.status, 400); assert.equal((await invalid.json()).errorCode, 'error.invalidAudio');
+  const missing = await fetch(`${f.origin}/api/export`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ manifest, audioId: id }) });
+  assert.equal(missing.status, 400); assert.equal((await missing.json()).errorCode, 'error.audioMissing');
+});
+
 test('typed local paths preserve Unicode and spaces, clear remote URLs and omit tokens',{timeout:20000},async(t)=>{
   const f=await studioFixture(t),repo=join(f.dir,'中文 仓库');
   execFileSync('git',['clone',f.repo,repo],{stdio:'pipe'});
@@ -76,7 +124,7 @@ test('typed local paths preserve Unicode and spaces, clear remote URLs and omit 
 test('picker cancellation and failure retain manually entered paths',{timeout:20000},async(t)=>{
   const f=await studioFixture(t);await f.page.goto(f.origin);
   await f.page.locator('#source').fill(f.repo);
-  for(const result of [{ok:false,cancelled:true},{ok:false,error:'弹窗不可用'}]) {
+  for(const result of [{ok:false,cancelled:true},{ok:false,error:'弹窗不可用',errorCode:'folderUnavailable'}]) {
     await f.page.route('**/api/pick-local',route=>route.fulfill({json:result}));
     await f.page.locator('#pick-local').click();await f.page.waitForFunction(()=>!document.querySelector('#pick-local').disabled);
     assert.equal(await f.page.locator('#source').inputValue(),f.repo);
@@ -245,13 +293,13 @@ test('Studio restores export controls after streamed errors, premature EOF and n
     await f.page.evaluate(kind=>{
       const c=window.exportController;
       c.enqueue(new TextEncoder().encode('{"type":"start"}\n'));
-      if(kind==='error'){const bytes=new TextEncoder().encode('{"type":"error","error":"本地编码失败"}\n');const split=new TextEncoder().encode('{"type":"error","error":"').length+1;c.enqueue(bytes.slice(0,split));c.enqueue(bytes.slice(split));c.close();}
+      if(kind==='error'){const bytes=new TextEncoder().encode('{"type":"error","error":"本地编码失败","errorCode":"error.encoding"}\n');const split=new TextEncoder().encode('{"type":"error","error":"').length+1;c.enqueue(bytes.slice(0,split));c.enqueue(bytes.slice(split));c.close();}
       else if(kind==='eof')c.close();
       else c.error(new Error('连接断开'));
     },kind);
     await f.page.waitForFunction(()=>!document.querySelector('#export').disabled);
     const status=await f.page.locator('#export-status').textContent();assert.match(status,/导出失败/);
-    assert.match(status,kind==='error'?/本地编码失败/:kind==='eof'?/未收到完成结果/:/连接断开/);
+    assert.match(status,kind==='error'?/视频编码失败/:kind==='eof'?/未收到完成结果/:/查看终端日志/);
     assert.equal(await f.page.locator('#export-status a').count(),0);
   }
 });
@@ -296,7 +344,7 @@ test('fullscreen includes controls, preserves aspect ratio and follows exit even
   const source=await f.page.locator('#source').inputValue();
   await f.page.locator('#scrub').evaluate(el=>{el.value=10;el.dispatchEvent(new Event('input',{bubbles:true}));});
   await f.page.locator('#fullscreen').click();
-  await f.page.waitForFunction(()=>document.fullscreenElement?.id==='player');
+  await f.page.waitForFunction(()=>document.fullscreenElement?.id==='player' && document.querySelector('#fullscreen').textContent==='退出全屏');
   assert.equal(await f.page.locator('#fullscreen').textContent(),'退出全屏');
   const ratio=await f.page.locator('#preview').evaluate(el=>{const r=el.getBoundingClientRect();return r.width/r.height;});assert(Math.abs(ratio-16/9)<.02);
   assert(await f.page.locator('#export').isVisible());assert.equal(await f.page.locator('#scrub').inputValue(),'10');
@@ -310,7 +358,7 @@ test('fullscreen includes controls, preserves aspect ratio and follows exit even
   assert.equal(await f.page.locator('#statistics-details').evaluate(el=>el.open),true);
   assert.equal(await f.page.locator('#accounts').evaluate(el=>el.open),true);
   await f.page.evaluate(()=>{document.querySelector('#player').requestFullscreen=()=>Promise.reject(new Error('浏览器拒绝请求'));});
-  await f.page.locator('#fullscreen').click();await f.page.locator('#player-status').getByText('无法切换全屏：浏览器拒绝请求').waitFor();
+  await f.page.locator('#fullscreen').click();await f.page.locator('#player-status').getByText('无法切换全屏：操作失败，请重试并查看终端日志。').waitFor();
   assert.equal(await f.page.locator('#fullscreen').textContent(),'全屏');
 });
 
@@ -355,7 +403,7 @@ test('remote branches require an explicit read, allow retry and invalidate on UR
   let calls=0,submitted;
   await f.page.route('**/api/branches',route=>{
     calls++;submitted=route.request().postDataJSON();
-    return route.fulfill({json:calls===1?{ok:false,error:'鉴权失败，请重试'}:{ok:true,branches:['feature/test','main','master'],defaultBranch:'master'}});
+    return route.fulfill({json:calls===1?{ok:false,error:'鉴权失败，请重试',errorCode:'error.branchRemote'}:{ok:true,branches:['feature/test','main','master'],defaultBranch:'master'}});
   });
   await f.page.goto(f.origin);await f.openConfig();
   assert.equal(calls,0);assert(await f.page.locator('#analyze').isDisabled());
@@ -363,7 +411,7 @@ test('remote branches require an explicit read, allow retry and invalidate on UR
   await f.page.waitForFunction(()=>Number(document.querySelector('#scrub').value)>0);await f.page.locator('#play').click();
   await f.page.getByText('远程 GitLab（可选，较慢）',{exact:true}).click();
   await f.page.locator('#read-branches').click();
-  await f.page.waitForFunction(()=>document.querySelector('#status').textContent.includes('鉴权失败'));
+  await f.page.waitForFunction(()=>document.querySelector('#status').textContent.includes('读取远程分支失败'));
   assert(await f.page.locator('#analyze').isDisabled());assert(await f.page.locator('#read-branches').isEnabled());
   await f.page.locator('#read-branches').click();await f.page.waitForFunction(()=>!document.querySelector('#branch').disabled);
   assert.equal(await f.page.locator('#branch').inputValue(),'main','restore saved branch before the remote default');
@@ -404,8 +452,8 @@ test('shallow local history completes with one click, recovers from failure and 
   assert(await f.page.locator('#unshallow').isDisabled());assert(await f.page.locator('#source').isDisabled());
   assert(await f.page.locator('#retry-branches').isDisabled());assert(await f.page.locator('#analyze').isDisabled());
   assert.match(await f.page.locator('#status').textContent(),/正在下载/);
-  await route.fulfill({status:400,json:{ok:false,error:'测试网络失败'}});
-  await f.page.waitForFunction(()=>document.querySelector('#status').textContent.includes('测试网络失败'));
+  await route.fulfill({status:400,json:{ok:false,error:'测试网络失败',errorCode:'error.unshallowFailed'}});
+  await f.page.waitForFunction(()=>document.querySelector('#status').textContent.includes('补全历史失败'));
   assert(await f.page.locator('#unshallow').isEnabled());assert(await f.page.locator('#source').isEnabled());
   assert(await f.page.locator('#shallow-warning').isVisible());assert(await f.page.locator('#analyze').isDisabled());
   await f.page.unroute('**/api/unshallow');
@@ -430,10 +478,10 @@ test('analysis progress decodes split messages and failed streams retain the cur
   await send(JSON.stringify({type:'complete',ok:true,manifest}));await f.page.evaluate(()=>window.analysisController.close());
   await f.page.waitForFunction(()=>!document.querySelector('#analyze').disabled);assert.match(await f.page.locator('#status').textContent(),/已生成/);
   for(const error of [true,false]){
-    await start();if(error)await send('{"type":"error","error":"下载超时，请重新生成"}\n');
+    await start();if(error)await send('{"type":"error","error":"下载超时，请重新生成","errorCode":"error.downloadTimeout"}\n');
     await f.page.evaluate(()=>window.analysisController.close());
     await f.page.waitForFunction(()=>!document.querySelector('#analyze').disabled);
-    assert.match(await f.page.locator('#status').textContent(),error?/下载超时/:/未收到完成结果/);
+    assert.match(await f.page.locator('#status').textContent(),error?/下载历史超时/:/未收到完成结果/);
     assert.equal(await f.page.locator('#project-title').textContent(),manifest.project.name);
   }
 });

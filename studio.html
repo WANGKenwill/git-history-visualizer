@@ -14,6 +14,7 @@
       .project-heading { min-width: 0; flex: 1; }
       #project-title { margin: 0; font-size: 19px; overflow-wrap: anywhere; }
       #project-branch { display: block; color: var(--muted); font-size: 12px; margin-top: 4px; overflow-wrap: anywhere; }
+      #language { width: auto; flex-shrink: 0; }
       .page-header button { width: auto; margin: 0; white-space: nowrap; }
       aside { padding: 34px 26px; background: var(--panel); border-right: 1px solid var(--line); }
       h1 { margin: 0 0 10px; font: 700 21px system-ui; letter-spacing: -.03em; }
@@ -70,66 +71,79 @@
   <body>
     <header class="page-header">
       <div class="project-heading"><h1 id="project-title">Git History</h1><span id="project-branch"></span></div>
+      <select id="language" aria-label="语言" data-i18n-aria-label="language"><option value="zh-CN">中文</option><option value="en">English</option></select>
     </header>
     <div class="shell">
       <aside id="config-panel">
         <h1>Git History</h1>
-        <p class="lede">用开发者球群展示累计改动，用时间环展示提交时刻。首选输入本地 Git 路径：速度快，也不需要 GitLab Token。</p>
+        <p class="lede" data-i18n="lede">用开发者球群展示累计改动，用时间环展示提交时刻。首选输入本地 Git 路径：速度快，也不需要 GitLab Token。</p>
         <form id="form">
-          <label for="source">本地 Git 仓库</label>
-          <div class="path-row"><input id="source" placeholder="输入绝对路径，或选择文件夹" /><button id="pick-local" type="button" class="secondary">选择文件夹</button></div>
+          <label for="source" data-i18n="localRepository">本地 Git 仓库</label>
+          <div class="path-row"><input id="source" placeholder="输入绝对路径，或选择文件夹" data-i18n-placeholder="sourcePlaceholder" /><button id="pick-local" type="button" class="secondary" data-i18n="chooseFolder">选择文件夹</button></div>
           <details>
-            <summary>远程 GitLab（可选，较慢）</summary>
-            <p>首次生成会下载所选分支的完整历史到本地缓存，不展开源码文件；后续复用并更新缓存。已有普通缓存继续复用。</p>
-            <label for="remote-source">GitLab 仓库 URL</label>
+            <summary data-i18n="remoteRepository">远程 GitLab（可选，较慢）</summary>
+            <p data-i18n="remoteHelp">首次生成会下载所选分支的完整历史到本地缓存，不展开源码文件；后续复用并更新缓存。已有普通缓存继续复用。</p>
+            <label for="remote-source" data-i18n="repositoryUrl">GitLab 仓库 URL</label>
             <input id="remote-source" placeholder="https://gitlab.example.com/group/project" />
             <label for="token">GitLab Token</label>
-            <input id="token" type="password" placeholder="仅远程私有仓库需要" />
-            <button id="read-branches" type="button" class="secondary">读取分支</button>
+            <input id="token" type="password" placeholder="仅远程私有仓库需要" data-i18n-placeholder="tokenPlaceholder" />
+            <button id="read-branches" type="button" class="secondary" data-i18n="readBranches">读取分支</button>
           </details>
-          <label for="branch">目标分支</label>
-          <select id="branch" disabled><option value="">请先读取分支</option></select>
+          <label for="branch" data-i18n="branch">目标分支</label>
+          <select id="branch" disabled><option value="" data-i18n="branchesPlaceholder">请先读取分支</option></select>
           <div id="shallow-warning" role="status" hidden>
-            <p>此仓库为浅克隆，提交历史不完整，无法准确统计累计变更和最终留存。点击“补全历史”下载缺失历史，完成后自动重新读取分支。也可在仓库中手动执行 <code>git fetch --unshallow</code>。</p>
-            <button id="unshallow" type="button">补全历史（联网）</button>
-            <button id="copy-unshallow" type="button" class="secondary">复制补全命令</button>
-            <button id="retry-branches" type="button" class="secondary">重新读取分支</button>
+            <p><span data-i18n="shallowHelp">此仓库为浅克隆，提交历史不完整，无法准确统计累计变更和最终留存。点击“补全历史”下载缺失历史，完成后自动重新读取分支。也可在仓库中手动执行</span> <code>git fetch --unshallow</code>.</p>
+            <button id="unshallow" type="button" data-i18n="unshallow">补全历史（联网）</button>
+            <button id="copy-unshallow" type="button" class="secondary" data-i18n="copyUnshallow">复制补全命令</button>
+            <button id="retry-branches" type="button" class="secondary" data-i18n="retryBranches">重新读取分支</button>
           </div>
-          <label for="duration">视频时长（秒）</label>
-          <input id="duration" type="number" min="15" max="180" value="60" />
-          <label for="time-zone">提交时区</label>
+          <label for="duration" data-i18n="duration">视频时长（秒）</label>
+          <input id="duration" type="number" min="15" max="180" step="any" value="60" />
+          <label for="time-zone" data-i18n="timeZone">提交时区</label>
           <input id="time-zone" value="Asia/Shanghai" />
-          <label for="max-authors">显示作者人数（其余汇总）</label>
+          <label for="max-authors" data-i18n="maxAuthors">显示作者人数（其余汇总）</label>
           <input id="max-authors" type="number" min="1" max="32" value="16" />
-          <button id="analyze" disabled>生成可视化</button>
+          <button id="analyze" disabled data-i18n="analyze">生成可视化</button>
         </form>
-        <div id="status" role="status">等待导入仓库。</div>
+        <div id="status" role="status" data-i18n="waiting">等待导入仓库。</div>
       </aside>
       <main>
-        <section id="player" class="player" aria-label="历史播放器">
+        <section id="player" class="player" aria-label="历史播放器" data-i18n-aria-label="playerLabel">
           <div class="stage"><canvas id="preview" width="1920" height="1080"></canvas></div>
           <div class="toolbar">
-            <button id="play" class="secondary">播放</button>
-            <input id="scrub" aria-label="播放进度" type="range" min="0" max="60" step="0.01" value="0" />
+            <button id="play" class="secondary" data-i18n="play">播放</button>
+            <input id="scrub" aria-label="播放进度" data-i18n-aria-label="seekLabel" type="range" min="0" max="60" step="0.01" value="0" />
             <span id="time-label">0.0s / 60s</span>
-            <button id="fullscreen" class="secondary" aria-pressed="false">全屏</button>
-            <button id="export" class="secondary" disabled>导出 MP4</button>
+            <button id="fullscreen" class="secondary" aria-pressed="false" data-i18n="fullscreen">全屏</button>
+            <button id="export" class="secondary" disabled data-i18n="export">导出 MP4</button>
           </div>
           <div id="export-status" role="status"></div>
           <div id="player-status" role="status"></div>
         </section>
-        <section class="overview" aria-label="项目概览">
-          <h2>项目概览</h2><div id="summary" class="summary"></div>
-          <details id="statistics-details"><summary>统计详情</summary><p id="extra-stats"></p><p class="lede">改动量不等于贡献质量；合并提交与冲突解决改动不单独计入。Squash 仅展示保留的提交和作者。</p></details>
+        <details id="audio-options">
+          <summary data-i18n="audioHeading">添加配乐（可选）</summary>
+          <input id="audio-file" type="file" hidden accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac" />
+          <div class="toolbar"><button id="choose-audio" class="secondary" data-i18n="audioFile">选择本地音频</button></div>
+          <p id="audio-status" role="status" class="lede" data-i18n="audioHelp">仅用于 MP4 导出；音频自动循环，到视频结束时截断。最大 100 MB。</p>
+          <div class="toolbar"><button id="match-audio-duration" class="secondary" disabled data-i18n="matchAudioDuration">视频时长设为音频时长</button><button id="clear-audio" class="secondary" disabled data-i18n="clearAudio">移除音频</button></div>
+        </details>
+        <section class="overview" aria-label="项目概览" data-i18n-aria-label="overview">
+          <h2 data-i18n="overview">项目概览</h2><div id="summary" class="summary"></div>
+          <details id="statistics-details"><summary data-i18n="statistics">统计详情</summary><p id="extra-stats"></p><p class="lede" data-i18n="statisticsHelp">改动量不等于贡献质量；合并提交与冲突解决改动不单独计入。Squash 仅展示保留的提交和作者。</p></details>
         </section>
-        <div id="author-detail" class="stat"><span id="author-stats">点击开发者球查看累计改动与最终存留。</span></div>
-        <details id="accounts"><summary>账号关联（配置后点击“生成可视化”生效）</summary><p id="account-status"></p><div id="account-list"></div></details>
+        <div id="author-detail" class="stat"><span id="author-stats" data-i18n="authorHint">点击开发者球查看累计改动与最终存留。</span></div>
+        <details id="accounts"><summary data-i18n="accountsHeading">账号关联（配置后点击“生成可视化”生效）</summary><p id="account-status"></p><div id="account-list"></div></details>
       </main>
     </div>
     <script src="./data/manifest.js"></script>
     <script type="module">
       if (location.protocol === 'file:') {
-        document.querySelector('#status').innerHTML = '请运行 <code>npm run studio</code>，并通过 HTTP 地址访问：<a href="http://127.0.0.1:4173/">打开本地 Studio</a>。使用自定义端口时，请打开终端显示的地址。';
+        let locale;
+        try { locale = localStorage.getItem('git-history-locale'); } catch {}
+        const chinese = locale ? locale === 'zh-CN' : navigator.language.startsWith('zh');
+        document.documentElement.lang = chinese ? 'zh-CN' : 'en';
+        document.querySelector('#language').value = chinese ? 'zh-CN' : 'en';
+        document.querySelector('#status').innerHTML = chinese ? '请运行 <code>npm run studio</code>，并通过 HTTP 地址访问：<a href="http://127.0.0.1:4173/">打开本地 Studio</a>。使用自定义端口时，请打开终端显示的地址。' : 'Run <code>npm run studio</code> and open the HTTP address: <a href="http://127.0.0.1:4173/">Open local Studio</a>. For a custom port, use the address shown in the terminal.';
         document.querySelectorAll('input, button, select').forEach(control => { control.disabled = true; });
       } else {
         import('./src/studio.js');

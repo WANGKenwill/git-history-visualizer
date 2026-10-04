@@ -48,11 +48,11 @@ Open http://127.0.0.1:4173 to play the demo. On macOS, the browser opens automat
 
 ## Usage
 
-The interface is currently in Chinese.
+Choose 中文 / English in the top-right corner. The first visit follows your browser language; later visits remember your choice. The interface, preview and new video exports share one language. Switching does not require another analysis.
 
-1. Select a local Git repository, or enter a remote GitLab URL and click **读取分支** (“Read branches”). Provide a token for private repositories when needed.
-2. Choose a branch, duration, time zone, and author limit, then click **生成可视化** (“Generate visualization”). By default, 16 authors are displayed; the rest are grouped as **其他** (“Other”).
-3. Play, scrub, or enter fullscreen. Click an author circle for statistics, or click **导出 MP4** (“Export MP4”) to save a video.
+1. Select a local Git repository, or enter a remote GitLab URL and click **Read branches**. Provide a token for private repositories when needed.
+2. Choose a branch, duration, time zone, and author limit, then click **Generate visualization**. By default, 16 authors are displayed; the rest are grouped as **Other**.
+3. Play, scrub, or enter fullscreen. Click an author circle for statistics, or click **Export MP4** to save a video.
 
 Generation displays analysis stages and file progress for retained lines, reusing the retention cache when available. Only one analysis runs at a time. Remote downloads, updates, and full-history fetches time out after five minutes with retry guidance. Failed analysis preserves the previous visualization.
 
@@ -61,6 +61,8 @@ Identical names with different email addresses remain separate by default. You c
 Regular repositories, Git worktrees, and bare repositories are supported. For shallow clones, click **补全历史（联网）** (“Fetch full history — requires internet”) or run `git fetch --unshallow` manually. Analysis never fetches missing history automatically. Remote analysis downloads and caches the full history of the selected branch, which may require substantial disk space.
 
 Videos are saved to `exports/` as 1920×1080, 30 fps, H.264 MP4 files. Preview and export share the same drawing function, and the final frame shows complete cumulative totals. Only one export runs at a time.
+
+Expand **Add soundtrack** to choose local audio (maximum 100 MB; MP3, WAV, M4A and other formats readable by local FFmpeg). The filename and duration are shown. Shorter audio loops; longer audio is trimmed; the MP4 includes an AAC track. Without audio, exports remain silent. **Match video duration to audio** (15–180 seconds) immediately adjusts the current preview and export timeline without reanalyzing the repository. Audio is for export only; preview remains silent. Files are temporarily stored locally and cleaned up when removed, replaced, or the server exits. Select audio again after refreshing the page.
 
 ## What the statistics mean
 
@@ -87,6 +89,8 @@ The bundled demo is pinned to DSH's `master` commit [`5badb150`](https://github.
 npm run check       # Statistics, UI, and video export tests
 npm run licenses    # Update third-party license notices
 ```
+
+Exports render each frame at a fixed timestamp and send raw Canvas pixels to FFmpeg over a local connection, avoiding PNG compression, Base64 transfer, and PNG decoding. Browser Content Security Policy restricts resources and connections to the same origin; export does not access external networks.
 
 Tests require Chromium and FFmpeg to be installed. CLI usage is also available:
 
