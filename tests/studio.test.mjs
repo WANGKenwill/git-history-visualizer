@@ -41,7 +41,8 @@ async function studioFixture(t, contextOptions = {}) {
     assert.equal(result.ok,true,result.error);
     return result.manifest;
   };
-  return {...f,page,select,generate,openConfig};
+  const play=async()=>{await openConfig();return page.locator('#play').evaluate(el=>{el.click();return {time:Number(document.querySelector('#scrub').value),label:el.textContent};});};
+  return {...f,page,select,generate,openConfig,play};
 }
 
 test('file URLs show startup guidance, disable controls and never load the Studio module',{timeout:20000},async(t)=>{
@@ -269,11 +270,27 @@ test('author details follow commit arrivals and legacy merge groups are not disp
   await seek(1);assert.match(await f.page.locator('#author-stats').textContent(),/点击开发者球/);
 });
 
+test('play waits for Studio initialization when the module loads slowly', { timeout: 10000 }, async t => {
+  const f = await studioFixture(t), page = f.page;
+  let releaseStudio;
+  const loading = new Promise(resolve => { releaseStudio = resolve; });
+  await page.route('**/src/studio.js', async route => { await loading; await route.continue(); });
+  try {
+    await page.goto(f.origin, { waitUntil: 'domcontentloaded' });
+    const firstPlay = f.play();
+    // Flush browser interactions while the real Studio module is still blocked.
+    assert.equal(await page.locator('#play').evaluate(el => el.textContent), '播放');
+    releaseStudio();
+    assert.deepEqual(await firstPlay, { time: 0, label: '暂停' });
+    await page.waitForFunction(() => Number(document.querySelector('#scrub').value) > 0);
+  } finally { releaseStudio(); }
+});
+
 test('play restarts at the end and continues from an intermediate pause',{timeout:20000},async(t)=>{
   const f=await studioFixture(t),manifest=await f.analyze({source:f.repo});manifest.duration=.5;
   await f.page.route('**/data/manifest.js',route=>route.fulfill({contentType:'text/javascript',body:`window.__GIT_MANIFEST__=${JSON.stringify(manifest)};`}));
   await f.page.goto(f.origin);
-  const play=()=>f.page.locator('#play').evaluate(el=>{el.click();return {time:Number(document.querySelector('#scrub').value),label:el.textContent};});
+  const play=f.play;
   await play();
   await f.page.waitForFunction(()=>Number(document.querySelector('#scrub').value)===.5&&document.querySelector('#play').textContent==='播放');
   assert.deepEqual(await play(),{time:0,label:'暂停'});
