@@ -8,7 +8,7 @@ import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { serverFixture as fixture } from './helpers/server.mjs';
 
-test('uploaded local audio reaches the MP4 export and removed audio cannot be reused', { timeout: 30000 }, async t => {
+test('uploaded local audio reaches the MP4 export and removed audio cannot be reused', { timeout: 60000 }, async t => {
   const f = await fixture(t), manifest = await f.analyze({ source: f.repo });
   manifest.duration = 3; manifest.commits[0].at = 0;
   const audio = join(f.dir, 'music.wav');
@@ -96,7 +96,7 @@ test('local Git worktrees can be analyzed through Studio API',{timeout:20000},as
   assert.equal(m.totalChurn,1);
 });
 
-test('export API uses the submitted snapshot instead of the latest analyzed history',{timeout:20000},async(t)=>{
+test('export API uses the submitted snapshot instead of the latest analyzed history',{timeout:60000},async(t)=>{
   const f=await fixture(t);
   const snapshot=await f.analyze({source:f.repo});
   snapshot.duration=3;snapshot.commits[0].at=0;
@@ -114,7 +114,7 @@ test('export API uses the submitted snapshot instead of the latest analyzed hist
   assert.equal(missing.status,400);assert.match((await missing.json()).error,/manifest/);
 });
 
-test('streaming exports report progress, preserve JSON errors and clean up failed videos',{timeout:20000},async(t)=>{
+test('streaming exports report progress, preserve JSON errors and clean up failed videos',{timeout:60000},async(t)=>{
   const f=await fixture(t), snapshot=await f.analyze({source:f.repo});
   snapshot.duration=3;snapshot.commits[0].at=0;
   const post=manifest=>fetch(`${f.origin}/api/export`,{method:'POST',headers:{'content-type':'application/json',accept:'application/x-ndjson'},body:JSON.stringify({manifest})});

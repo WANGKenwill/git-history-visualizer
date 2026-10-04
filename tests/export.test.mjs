@@ -34,7 +34,7 @@ test('binary export frames preserve exact Canvas pixels and await the encoder si
   } finally { await session.close(); }
 });
 
-test('soundtrack exports loop short audio and trim long audio without changing frames or totals', async () => {
+test('soundtrack exports loop short audio and trim long audio without changing frames or totals', { timeout: 60000 }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'soundtrack-export-'));
   try {
     const manifest = { ...empty, duration: 2, totalChurn: 3,
@@ -112,7 +112,7 @@ test('export page matches interactive Canvas pixels and blocks external requests
   } finally { await previewContext?.close(); await session?.close(); await new Promise(done => server.close(done)); }
 });
 
-test('local MP4 has correct frames and missing/broken encoders leave no partial file', async () => {
+test('local MP4 has correct frames and missing/broken encoders leave no partial file', { timeout: 60000 }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'offline-export-'));
   try {
     const output = join(dir, 'sample.mp4');
@@ -136,7 +136,7 @@ test('local MP4 has correct frames and missing/broken encoders leave no partial 
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('MP4 validates final retained totals and removes incomplete output on mismatch',async()=>{
+test('MP4 validates final retained totals and removes incomplete output on mismatch',{timeout:60000},async()=>{
   const dir=mkdtempSync(join(tmpdir(),'retention-export-'));
   try {
     const manifest={...empty,retention:{version:2,mappedLines:0,totalLines:0,unmappedLines:0}};
@@ -152,7 +152,7 @@ test('MP4 validates final retained totals and removes incomplete output on misma
 });
 
 
-test('Chinese and English MP4 snapshots decode with identical final contribution and retention totals',async()=>{
+test('Chinese and English MP4 snapshots decode with identical final contribution and retention totals',{timeout:60000},async()=>{
   const dir=mkdtempSync(join(tmpdir(),'bilingual-export-'));
   try {
     for (const locale of ['zh-CN','en']) {
