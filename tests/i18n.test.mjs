@@ -76,7 +76,7 @@ test('browser language, persistent selection and state survive switching during 
   assert.equal(analyses,0);
   await page.reload();await page.locator('#summary strong').first().waitFor();assert.equal(await page.locator('html').getAttribute('lang'),'zh-CN');
   for(const width of [390,1000,1440]) {await page.setViewportSize({width,height:900});await page.locator('#language').selectOption('en');assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));}
-  await page.locator('#fullscreen').click();await page.waitForFunction(()=>document.fullscreenElement?.id==='player');
+  await page.locator('#fullscreen').click();await page.waitForFunction(()=>document.fullscreenElement?.id==='player' && document.querySelector('#fullscreen').textContent==='Exit fullscreen');
   assert.equal(await page.locator('#fullscreen').textContent(),'Exit fullscreen');
   await page.evaluate(()=>{const control=document.querySelector('#language');control.value='zh-CN';control.dispatchEvent(new Event('change'));});
   assert.equal(await page.locator('#fullscreen').textContent(),'退出全屏');

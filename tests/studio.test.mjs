@@ -296,7 +296,7 @@ test('fullscreen includes controls, preserves aspect ratio and follows exit even
   const source=await f.page.locator('#source').inputValue();
   await f.page.locator('#scrub').evaluate(el=>{el.value=10;el.dispatchEvent(new Event('input',{bubbles:true}));});
   await f.page.locator('#fullscreen').click();
-  await f.page.waitForFunction(()=>document.fullscreenElement?.id==='player');
+  await f.page.waitForFunction(()=>document.fullscreenElement?.id==='player' && document.querySelector('#fullscreen').textContent==='退出全屏');
   assert.equal(await f.page.locator('#fullscreen').textContent(),'退出全屏');
   const ratio=await f.page.locator('#preview').evaluate(el=>{const r=el.getBoundingClientRect();return r.width/r.height;});assert(Math.abs(ratio-16/9)<.02);
   assert(await f.page.locator('#export').isVisible());assert.equal(await f.page.locator('#scrub').inputValue(),'10');
