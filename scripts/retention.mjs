@@ -12,14 +12,16 @@ function originalPath(value) {
   const escapes={a:'\x07',b:'\b',t:'\t',n:'\n',v:'\v',f:'\f',r:'\r','"':'"','\\':'\\'};
   return value.slice(1,-1).replace(/\\([0-7]{1,3}|[abtnvfr"\\])/g,(_,c)=>escapes[c]??String.fromCharCode(parseInt(c,8)));
 }
-export async function analyzeRetention(repo,head,commits,excludesKey,isExcluded,previousManifest) {
+export async function analyzeRetention(repo,head,commits,excludesKey,isExcluded,previousManifest,onProgress=()=>{}) {
   const started=performance.now(), old=previousManifest?.retention;
   const cacheHit=old?.version===2&&old.head===head&&old.excludesKey===excludesKey&&commits.every(c=>Number.isInteger(c.retainedLines)&&c.retainedLines>=0&&c.retainedLines<=c.churn);
-  if(cacheHit)return {retention:{...old},cacheHit:true,elapsedMs:performance.now()-started};
+  if(cacheHit){onProgress({stage:"retention",cacheHit:true});return {retention:{...old},cacheHit:true,elapsedMs:performance.now()-started};}
   const git=args=>execFileSync('git',['-C',repo,...args],{encoding:'utf8',stdio:'pipe',maxBuffer:64*1024*1024});
   const empty=git(['hash-object','-t','tree','--stdin']).trim();
   const regularFiles=new Set(git(['ls-tree','-r','-z',head]).split('\0').filter(record=>record.startsWith('100')).map(record=>record.slice(record.indexOf('\t')+1)));
   const files=numstatEntries(git(['diff','--numstat','-z','--no-renames',empty,head])).filter(f=>!f.binary&&regularFiles.has(f.path)&&!isExcluded(f.path));
+  const total=files.filter(f=>f.additions>0).length;let completed=0;
+  onProgress({stage:"retention",completed,total});
   const bySha=new Map(commits.map(c=>{c.retainedLines=0;return [c.sha,c];}));
   const origins=new Map();
   let totalLines=0,mappedLines=0;
@@ -48,6 +50,7 @@ export async function analyzeRetention(repo,head,commits,excludesKey,isExcluded,
           }
         }
       }
+      onProgress({stage:"retention",completed:++completed,total});
     }
   }
   await Promise.all(Array.from({length:Math.min(4,files.length)},()=>worker()));

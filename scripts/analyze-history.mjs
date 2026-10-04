@@ -95,7 +95,9 @@ function normalizedTimeline(commits, duration) {
   });
 }
 
-export async function analyzeHistory({ repo, branch = "main", excludes = DEFAULT_EXCLUDES, duration = 60, projectName = "Git history", previousManifest = null, timeZone = "Asia/Shanghai", maxAuthors = 16, accountLinks }) {
+export async function analyzeHistory({ repo, branch = "main", excludes = DEFAULT_EXCLUDES, duration = 60, projectName = "Git history", previousManifest = null, timeZone = "Asia/Shanghai", maxAuthors = 16, accountLinks, onProgress = () => {} }) {
+  const progress = async event => { onProgress(event); await new Promise(resolve => setImmediate(resolve)); };
+  await progress({ stage: "history" });
   requireFullHistory(repo);
   new Intl.DateTimeFormat("zh-CN", { timeZone }).format(0);
   duration = Math.min(180, Math.max(15, Number(duration) || 60));
@@ -113,6 +115,7 @@ export async function analyzeHistory({ repo, branch = "main", excludes = DEFAULT
   const canIncrement = currentFormat && (cacheHit || allCommits.some((commit) => commit.sha === previousManifest.project.head));
   const previous = new Map(canIncrement ? previousManifest.commits.map((commit) => [commit.sha, commit]) : []);
   const newShas = regular.filter((commit) => !previous.has(commit.sha)).map((commit) => commit.sha);
+  await progress({ stage: "changes" });
   const stats = newShas.length ? parseNumstatLog(repo, ["--no-merges", head, ...(canIncrement ? [`^${previousManifest.project.head}`] : [])], pathExcludes) : new Map();
   const commits = cacheHit ? structuredClone(previousManifest.commits) : regular.map((commit) => ({
     ...commit, authorId: commit.authorEmail.toLowerCase(),
@@ -121,7 +124,9 @@ export async function analyzeHistory({ repo, branch = "main", excludes = DEFAULT
   })).sort((a, b) => Date.parse(a.authoredAt) - Date.parse(b.authoredAt) || Date.parse(a.committedAt) - Date.parse(b.committedAt) || a.sha.localeCompare(b.sha));
   const groups = [];
   for (const commit of commits) commit.groupIds = [];
-  const retentionResult = await analyzeRetention(repo, head, commits, rulesKey, path => excluded(path, pathExcludes), canIncrement ? previousManifest : null);
+  await progress({ stage: "retention" });
+  const retentionResult = await analyzeRetention(repo, head, commits, rulesKey, path => excluded(path, pathExcludes), canIncrement ? previousManifest : null, onProgress);
+  await progress({ stage: "layout" });
   const authors = makeAuthorMap(commits).map((author) => ({ ...author, additions: 0, deletions: 0, churn: 0, retainedLines: 0, commitCount: 0 }));
   const authorMap = new Map(authors.map((author) => [author.id, author]));
   for (const commit of commits) {

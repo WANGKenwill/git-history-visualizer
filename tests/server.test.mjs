@@ -267,3 +267,48 @@ syncBuiltinESMExports();
   assert.deepEqual(readdirSync(join(f.dir,'app','.cache/repositories')),[]);
   assert.deepEqual(readdirSync(join(f.dir,'app','.cache/current')),[]);
 });
+
+test('analysis streams ordered stages and file progress, reuses cache and preserves last result on error',{timeout:20000},async(t)=>{
+  const f=await fixture(t);
+  for(let i=0;i<8;i++)writeFileSync(join(f.repo,`file-${i}.txt`),'one\ntwo\n');
+  f.git('add','.');f.git('commit','-m','many files');
+  const post=async source=>{
+    const response=await fetch(`${f.origin}/api/analyze`,{method:'POST',headers:{'content-type':'application/json',accept:'application/x-ndjson'},body:JSON.stringify({source,branch:'main'})});
+    assert.match(response.headers.get('content-type'),/application\/x-ndjson/);
+    return (await response.text()).trim().split('\n').map(line=>JSON.parse(line));
+  };
+  const first=await post(f.repo),stages=[...new Set(first.filter(e=>e.type==='progress').map(e=>e.stage))];
+  assert.deepEqual(stages,['repository','history','changes','retention','layout']);
+  const files=first.filter(e=>e.stage==='retention'&&Number.isInteger(e.completed));
+  assert.equal(files[0].completed,0);assert.equal(files.at(-1).completed,9);assert.equal(files.at(-1).total,9);
+  const complete=first.at(-1);assert.equal(complete.type,'complete');assert.equal(complete.manifest.totalChurn,17);
+  const cache=await post(f.repo);assert(cache.some(e=>e.stage==='retention'&&e.cacheHit));assert(cache.at(-1).analysis.cacheHit);
+  const current=readFileSync(join(f.dir,'app/.cache/current/manifest.json'),'utf8');
+  const failed=await post(join(f.dir,'missing'));assert.equal(failed.at(-1).type,'error');assert(!failed.some(e=>e.type==='complete'));
+  assert.equal(readFileSync(join(f.dir,'app/.cache/current/manifest.json'),'utf8'),current);
+  assert.equal((await post(f.repo)).at(-1).type,'complete','failure releases analysis lock');
+});
+
+test('remote download timeouts clean partial clones, redact credentials and allow retry',{timeout:20000},async(t)=>{
+  const dir=mkdtempSync(join(tmpdir(),'history-download-'));t.after(()=>rmSync(dir,{recursive:true,force:true}));
+  const preload=join(dir,'mock.mjs'),log=join(dir,'timeout.json');
+  writeFileSync(preload,`
+import cp from 'node:child_process';
+import {syncBuiltinESMExports} from 'node:module';
+import {mkdirSync,writeFileSync} from 'node:fs';
+const original=cp.execFile;
+cp.execFile=function(file,args,options,callback){
+ if(!args.includes('clone'))return original.apply(this,arguments);
+ mkdirSync(args.at(-1),{recursive:true});writeFileSync(args.at(-1)+'/partial','incomplete');
+ writeFileSync(process.env.TIMEOUT_LOG,JSON.stringify({timeout:options.timeout}));
+ setTimeout(()=>callback(Object.assign(new Error('secret-token'),{killed:true})),100);
+};syncBuiltinESMExports();`);
+  const f=await fixture(t,{NODE_OPTIONS:`--import=${preload}`,TIMEOUT_LOG:log});
+  for(let i=0;i<2;i++){
+    const pending=fetch(`${f.origin}/api/analyze`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({source:'https://example.invalid/repo.git',token:'secret-token'})});
+    const response=await pending;assert.equal(response.status,400);const result=await response.json();
+    assert.match(result.error,/超时.*重新生成/);assert(!result.error.includes('secret-token'));
+    assert.deepEqual(readdirSync(join(f.dir,'app/.cache/repositories')),[]);
+  }
+  assert.equal(JSON.parse(readFileSync(log,'utf8')).timeout,300000);
+});

@@ -13,6 +13,14 @@ async function studioFixture(t) {
   t.after(()=>browser.close());
   const context=await browser.newContext();
   const page=await context.newPage();
+  await page.addInitScript(()=>{
+    const realFetch=window.fetch;
+    window.fetch=async(...args)=>{
+      const response=await realFetch(...args);
+      if(args[0]==='/api/analyze')window.analysisResult=response.clone().text().then(text=>response.headers.get('content-type')?.includes('application/x-ndjson')?text.trim().split('\n').map(line=>JSON.parse(line)).find(event=>event.type==='complete'):JSON.parse(text));
+      return response;
+    };
+  });
   let picked=f.repo;
   await page.route('**/api/pick-local',route=>route.fulfill({json:{ok:true,path:picked}}));
   const openConfig=async()=>{await page.locator('#summary strong').first().waitFor({state:'attached'});await page.locator('#config-panel').waitFor({state:'visible'});};
@@ -27,7 +35,8 @@ async function studioFixture(t) {
     await page.waitForFunction(()=>!document.querySelector("#analyze").disabled);
     const response=page.waitForResponse(response=>response.url().endsWith('/api/analyze'));
     await page.locator('#analyze').click();
-    const result=await (await response).json();
+    await response;
+    const result=await page.evaluate(()=>window.analysisResult);
     await page.waitForFunction(()=>!document.querySelector('#analyze').disabled);
     assert.equal(result.ok,true,result.error);
     return result.manifest;
@@ -404,4 +413,27 @@ test('shallow local history completes with one click, recovers from failure and 
   assert.match(await f.page.locator('#status').textContent(),/历史已补全/);
   assert(await f.page.locator('#shallow-warning').isHidden());
   const m=await f.generate();assert.equal(m.totalChurn,2);assert.equal(m.rules.historyCompleteness,'full-v1');
+});
+
+test('analysis progress decodes split messages and failed streams retain the current history',{timeout:20000},async(t)=>{
+  const f=await studioFixture(t),manifest=await f.analyze({source:f.repo});await f.page.goto(f.origin);await f.openConfig();
+  await f.page.waitForFunction(()=>!document.querySelector('#analyze').disabled);
+  await f.page.evaluate(()=>{
+    const original=window.fetch;
+    window.fetch=(url,options)=>url==='/api/analyze'?Promise.resolve(new Response(new ReadableStream({start(controller){window.analysisController=controller;}}),{headers:{'content-type':'application/x-ndjson'}})):original(url,options);
+  });
+  const send=text=>f.page.evaluate(text=>window.analysisController.enqueue(new TextEncoder().encode(text)),text);
+  const start=async()=>{await f.page.evaluate(()=>window.analysisController=null);await f.page.locator('#analyze').click();await f.page.waitForFunction(()=>window.analysisController);};
+  await start();await send('{"type":"progress","stage":"retention","completed":2,');await send('"total":9}\n');
+  await f.page.waitForFunction(()=>document.querySelector('#status').textContent.includes('2/9'));
+  assert(await f.page.locator('#analyze').isDisabled());
+  await send(JSON.stringify({type:'complete',ok:true,manifest}));await f.page.evaluate(()=>window.analysisController.close());
+  await f.page.waitForFunction(()=>!document.querySelector('#analyze').disabled);assert.match(await f.page.locator('#status').textContent(),/已生成/);
+  for(const error of [true,false]){
+    await start();if(error)await send('{"type":"error","error":"下载超时，请重新生成"}\n');
+    await f.page.evaluate(()=>window.analysisController.close());
+    await f.page.waitForFunction(()=>!document.querySelector('#analyze').disabled);
+    assert.match(await f.page.locator('#status').textContent(),error?/下载超时/:/未收到完成结果/);
+    assert.equal(await f.page.locator('#project-title').textContent(),manifest.project.name);
+  }
 });
