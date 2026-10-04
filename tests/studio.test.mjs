@@ -15,11 +15,14 @@ async function studioFixture(t) {
   const page=await context.newPage();
   let picked=f.repo;
   await page.route('**/api/pick-local',route=>route.fulfill({json:{ok:true,path:picked}}));
+  const openConfig=async()=>{await page.locator('#summary strong').first().waitFor({state:'attached'});if(!await page.locator('#config-panel').isVisible())await page.locator('#toggle-config').click();};
   const select=async(path)=>{
+    await openConfig();
     picked=path;await page.locator('#pick-local').click();
     await page.waitForFunction(path=>document.querySelector('#source').value===path&&!document.querySelector('#pick-local').disabled,path);
   };
   const generate=async()=>{
+    await openConfig();
     const response=page.waitForResponse(response=>response.url().endsWith('/api/analyze'));
     await page.locator('#analyze').click();
     const result=await (await response).json();
@@ -27,7 +30,7 @@ async function studioFixture(t) {
     assert.equal(result.ok,true,result.error);
     return result.manifest;
   };
-  return {...f,page,select,generate};
+  return {...f,page,select,generate,openConfig};
 }
 
 test('file URLs show startup guidance, disable controls and never load the Studio module',{timeout:20000},async(t)=>{
@@ -44,7 +47,7 @@ test('typed local paths preserve Unicode and spaces, clear remote URLs and omit 
   const f=await studioFixture(t),repo=join(f.dir,'中文 仓库');
   execFileSync('git',['clone',f.repo,repo],{stdio:'pipe'});
   await f.page.goto(f.origin);
-  await f.page.getByText('远程 GitLab（可选，较慢）',{exact:true}).click();
+  await f.openConfig();await f.page.getByText('远程 GitLab（可选，较慢）',{exact:true}).click();
   await f.page.locator('#remote-source').fill('https://gitlab.example.com/old');await f.page.locator('#token').fill('private-token');
   await f.page.locator('#source').fill(`  ${repo}  `);
   assert.equal(await f.page.locator('#remote-source').inputValue(),'');
@@ -52,7 +55,7 @@ test('typed local paths preserve Unicode and spaces, clear remote URLs and omit 
   const result=await f.generate(),body=(await submitted).postDataJSON();
   assert.equal(body.source,repo);assert.equal(body.token,'');assert.equal(body.branch,'main');assert.equal(result.totalChurn,1);
   const remote='https://gitlab.example.com/new';
-  await f.page.locator('#remote-source').fill(remote);
+  await f.openConfig();await f.page.locator('#remote-source').fill(remote);
   await f.page.route('**/api/analyze',route=>{const body=route.request().postDataJSON();assert.equal(body.source,remote);assert.equal(body.token,'private-token');return route.fulfill({json:{ok:true,manifest:result}});});
   await f.generate();
 });
@@ -94,7 +97,7 @@ test('choosing a local repository replaces a previously entered remote source',{
   const f=await studioFixture(t);
   const manifest=await f.analyze({source:f.repo});
   await f.page.goto(f.origin);
-  await f.page.getByText('远程 GitLab（可选，较慢）',{exact:true}).click();
+  await f.openConfig();await f.page.getByText('远程 GitLab（可选，较慢）',{exact:true}).click();
   await f.page.locator('#remote-source').fill('https://gitlab.example.com/group/old');
   await f.page.locator('#token').fill('private-token');
   let submitted;
@@ -139,12 +142,12 @@ test('each Studio page exports its own manifest after another page analyzes hist
   });
   for(const page of [f.page,other]) {
     await page.locator('#export').click();
-    await page.locator('#status a').waitFor();
+    await page.locator('#export-status a').waitFor();
   }
   assert.deepEqual(submitted,[{manifest:first},{manifest:second}]);
 });
 
-test('merge details remain clickable while playing and update when arrivals change',{timeout:20000},async(t)=>{
+test('author details follow commit arrivals and legacy merge groups are not displayed',{timeout:20000},async(t)=>{
   const f=await studioFixture(t);
   const manifest={version:2,project:{name:'详情测试',branch:'main'},duration:30,
     authors:[{id:'a@test',name:'测试作者',email:'a@test',churn:200,color:'#79dce8'}],
@@ -157,24 +160,11 @@ test('merge details remain clickable while playing and update when arrivals chan
   await seek(3);
   const node=historyState(manifest,3).nodes[0],bounds=await f.page.locator('#preview').boundingBox();
   await f.page.mouse.click(bounds.x+node.x*bounds.width/1920,bounds.y+node.y*bounds.height/1080);
-  const summary=f.page.locator('#author-detail summary');await summary.waitFor();
-  const original=await summary.elementHandle();
-  await f.page.locator('#play').click();
-  for(const expected of [true,false]) {
-    await summary.scrollIntoViewIfNeeded();
-    const box=await summary.boundingBox();await f.page.mouse.move(box.x+box.width/2,box.y+box.height/2);
-    const pressedAt=await f.page.locator('#scrub').evaluate(el=>Number(el.value));
-    await f.page.mouse.down();
-    await f.page.waitForFunction(time=>Number(document.querySelector('#scrub').value)>time+.06,pressedAt);
-    await f.page.mouse.up();
-    assert.equal(await original.evaluate(el=>el.isConnected),true);
-    assert.equal(await f.page.locator('#author-detail details').evaluate(el=>el.open),expected);
-  }
-  await seek(9);assert.match(await summary.textContent(),/2 个合并组/);
-  assert.equal(await original.evaluate(el=>el.isConnected),true);
-  assert.match(await f.page.locator('#author-detail').textContent(),/改动 200/);
-  await seek(3);assert.match(await summary.textContent(),/1 个合并组/);
-  await seek(1);assert.equal(await f.page.locator('#author-detail details:visible').count(),0);
+  assert.match(await f.page.locator('#author-stats').textContent(),/改动 100/);
+  assert.equal(await f.page.locator('#merge-details').count(),0);
+  assert.doesNotMatch(await f.page.locator('#extra-stats').textContent(),/合并组/);
+  await seek(9);assert.match(await f.page.locator('#author-stats').textContent(),/改动 200/);
+  await seek(1);assert.match(await f.page.locator('#author-stats').textContent(),/点击开发者球/);
 });
 
 test('play restarts at the end and continues from an intermediate pause',{timeout:20000},async(t)=>{
@@ -206,17 +196,21 @@ test('Studio decodes split progress messages and only offers downloads after com
   await f.page.locator('#export').click();await f.page.waitForFunction(()=>window.exportController);
   assert.equal(await f.page.evaluate(()=>window.exportAccept),'application/x-ndjson');
   await enqueue(Buffer.from('{"type":"start"}\n{"type":"progress","frame":'));
-  assert.equal(await f.page.locator('#status').textContent(),'准备导出…');
+  assert.equal(await f.page.locator('#export-status').textContent(),'准备导出…');
+  await f.openConfig();await f.page.locator('#source').fill('/tmp/another repository');
+  assert.match(await f.page.locator('#status').textContent(),/输入的本地路径/);
+  assert.equal(await f.page.locator('#export-status').textContent(),'准备导出…');
+  await f.page.locator('#toggle-config').click();
   await enqueue(Buffer.from('1,"total":90}\n'));
-  await f.page.waitForFunction(()=>document.querySelector('#status').textContent.includes('1/90'));
-  assert.match(await f.page.locator('#status').textContent(),/1%/);assert(await f.page.locator('#export').isDisabled());
+  await f.page.waitForFunction(()=>document.querySelector('#export-status').textContent.includes('1/90'));
+  assert.match(await f.page.locator('#export-status').textContent(),/1%/);assert(await f.page.locator('#export').isDisabled());
   await enqueue(Buffer.from('{"type":"progress","frame":90,"total":90}\n'));
-  await f.page.waitForFunction(()=>document.querySelector('#status').textContent.includes('正在完成编码'));
-  assert.equal(await f.page.locator('#status a').count(),0);
+  await f.page.waitForFunction(()=>document.querySelector('#export-status').textContent.includes('正在完成编码'));
+  assert.equal(await f.page.locator('#export-status a').count(),0);
   const complete=Buffer.from(JSON.stringify({type:'complete',file:'/exports/测试.mp4'})),split=complete.indexOf(Buffer.from('测'))+1;
   await enqueue(complete.subarray(0,split));await enqueue(complete.subarray(split));
   await f.page.evaluate(()=>window.exportController.close());
-  await f.page.locator('#status a').waitFor();assert.equal(await f.page.locator('#status a').getAttribute('href'),'/exports/测试.mp4');
+  await f.page.locator('#export-status a').waitFor();assert.equal(await f.page.locator('#export-status a').getAttribute('href'),'/exports/测试.mp4');
   await f.page.waitForFunction(()=>!document.querySelector('#export').disabled);
 });
 
@@ -236,8 +230,89 @@ test('Studio restores export controls after streamed errors, premature EOF and n
       else c.error(new Error('连接断开'));
     },kind);
     await f.page.waitForFunction(()=>!document.querySelector('#export').disabled);
-    const status=await f.page.locator('#status').textContent();assert.match(status,/导出失败/);
+    const status=await f.page.locator('#export-status').textContent();assert.match(status,/导出失败/);
     assert.match(status,kind==='error'?/本地编码失败/:kind==='eof'?/未收到完成结果/:/连接断开/);
-    assert.equal(await f.page.locator('#status a').count(),0);
+    assert.equal(await f.page.locator('#export-status a').count(),0);
   }
+});
+
+
+test('watching layout defaults, responsive configuration and compact statistics',{timeout:20000},async(t)=>{
+  const f=await studioFixture(t);await f.page.goto(f.origin);await f.page.locator('#summary strong').first().waitFor({state:'attached'});
+  assert(await f.page.locator('#config-panel').isVisible());
+  assert.equal(await f.page.locator('#project-title').textContent(),'Git History');
+  await f.select(f.repo);const manifest=await f.generate();
+  assert(!await f.page.locator('#config-panel').isVisible());
+  assert.equal(await f.page.locator('#project-title').textContent(),manifest.project.name);
+  assert.equal(await f.page.locator('#summary .stat').count(),4);
+  assert.equal(await f.page.locator('#statistics-details').evaluate(el=>el.open),false);
+  assert.match(await f.page.locator('#extra-stats').textContent(),/未纳入贡献事件/);
+  await f.page.goto(f.origin);await f.page.locator('#summary strong').first().waitFor({state:'attached'});
+  assert(!await f.page.locator('#config-panel').isVisible());
+  for(const width of [1440,1000,803,390]){
+    await f.page.setViewportSize({width,height:1000});
+    for(const open of [false,true]){
+      if(open)await f.openConfig();
+      const metrics=await f.page.evaluate(()=>{
+        const canvas=document.querySelector('#preview').getBoundingClientRect(),panel=document.querySelector('#config-panel').getBoundingClientRect();
+        return {width:canvas.width,height:canvas.height,panelWidth:panel.width,panelBottom:panel.bottom,canvasTop:canvas.top,scroll:document.documentElement.scrollWidth};
+      });
+      assert(metrics.scroll<=width,`overflow at ${width}`);
+      assert(Math.abs(metrics.width/metrics.height-16/9)<.02);
+      if(width===803&&!open)assert(metrics.width>=740);
+      if(open&&width>=1000)assert.equal(metrics.panelWidth,320);
+      if(open&&width<1000)assert(metrics.canvasTop>=metrics.panelBottom);
+      if(open)await f.page.locator('#toggle-config').click();
+    }
+  }
+  await f.openConfig();await f.page.locator('#branch').fill('feature/test');
+  await f.page.locator('#toggle-config').click();await f.openConfig();
+  assert.equal(await f.page.locator('#branch').inputValue(),'feature/test');
+  await f.page.locator('#source').fill(join(f.dir,'missing'));
+  const response=f.page.waitForResponse(r=>r.url().endsWith('/api/analyze'));
+  await f.page.locator('#analyze').click();await response;
+  await f.page.waitForFunction(()=>!document.querySelector('#analyze').disabled);
+  assert(await f.page.locator('#config-panel').isVisible());
+  assert.match(await f.page.locator('#status').textContent(),/生成失败/);
+});
+
+test('focus view preserves configuration, details, selection and playback',{timeout:20000},async(t)=>{
+  const f=await studioFixture(t),manifest=await f.analyze({source:f.repo,duration:30});await f.page.goto(f.origin);await f.page.locator('#summary strong').first().waitFor({state:'attached'});
+  await f.openConfig();await f.page.locator('#statistics-details > summary').click();await f.page.locator('#accounts > summary').click();
+  await f.page.locator('#scrub').evaluate(el=>{el.value=10;el.dispatchEvent(new Event('input',{bubbles:true}));});
+  const node=historyState(manifest,10).nodes[0],box=await f.page.locator('#preview').boundingBox();
+  await f.page.mouse.click(box.x+node.x*box.width/1920,box.y+node.y*box.height/1080);
+  const selected=await f.page.locator('#author-stats').textContent();assert(selected.includes(node.name));
+  await f.page.locator('#focus-view').click();
+  assert(!await f.page.locator('#config-panel').isVisible());assert(!await f.page.locator('#summary').isVisible());assert(!await f.page.locator('#author-detail').isVisible());assert(!await f.page.locator('#accounts').isVisible());
+  assert.equal(await f.page.locator('#scrub').inputValue(),'10');
+  await f.page.locator('#focus-view').click();
+  assert(await f.page.locator('#config-panel').isVisible());
+  assert.equal(await f.page.locator('#statistics-details').evaluate(el=>el.open),true);
+  assert.equal(await f.page.locator('#accounts').evaluate(el=>el.open),true);
+  assert.equal(await f.page.locator('#author-stats').textContent(),selected);
+  await f.page.locator('#toggle-config').click();await f.page.locator('#play').click();await f.page.locator('#focus-view').click();
+  await f.page.waitForFunction(()=>Number(document.querySelector('#scrub').value)>10.1);
+  assert.equal(await f.page.locator('#play').textContent(),'暂停');
+  await f.page.locator('#focus-view').click();assert(!await f.page.locator('#config-panel').isVisible());
+  await f.page.locator('#play').click();
+});
+
+test('fullscreen includes controls, preserves aspect ratio and follows exit events',{timeout:20000},async(t)=>{
+  const f=await studioFixture(t);await f.analyze({source:f.repo});await f.page.goto(f.origin);await f.page.locator('#summary strong').first().waitFor({state:'attached'});
+  await f.page.locator('#scrub').evaluate(el=>{el.value=10;el.dispatchEvent(new Event('input',{bubbles:true}));});
+  await f.page.locator('#fullscreen').click();
+  await f.page.waitForFunction(()=>document.fullscreenElement?.id==='player');
+  assert.equal(await f.page.locator('#fullscreen').textContent(),'退出全屏');
+  const ratio=await f.page.locator('#preview').evaluate(el=>{const r=el.getBoundingClientRect();return r.width/r.height;});assert(Math.abs(ratio-16/9)<.02);
+  assert(await f.page.locator('#export').isVisible());assert.equal(await f.page.locator('#scrub').inputValue(),'10');
+  await f.page.locator('#fullscreen').click();await f.page.waitForFunction(()=>!document.fullscreenElement);
+  await f.page.locator('#fullscreen').click();await f.page.waitForFunction(()=>document.fullscreenElement);
+  await f.page.keyboard.press('Escape');
+  await f.page.waitForFunction(()=>!document.fullscreenElement);
+  await f.page.waitForFunction(()=>document.querySelector('#fullscreen').textContent==='全屏');
+  assert.equal(await f.page.locator('#fullscreen').getAttribute('aria-pressed'),'false');
+  await f.page.evaluate(()=>{document.querySelector('#player').requestFullscreen=()=>Promise.reject(new Error('浏览器拒绝请求'));});
+  await f.page.locator('#fullscreen').click();await f.page.locator('#player-status').getByText('无法切换全屏：浏览器拒绝请求').waitFor();
+  assert.equal(await f.page.locator('#fullscreen').textContent(),'全屏');
 });

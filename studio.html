@@ -7,27 +7,41 @@
     <style>
       :root { color-scheme: dark; --bg: #080b10; --panel: #121a24; --line: #263343; --fg: #edf3f8; --muted: #8795a5; --accent: #ffb000; }
       * { box-sizing: border-box; }
-      body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--fg); font-family: "IBM Plex Mono", ui-monospace, monospace; }
-      .shell { display: grid; grid-template-columns: 320px minmax(0, 1fr); min-height: 100vh; }
+      body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--fg); font-family: system-ui, -apple-system, sans-serif; }
+      .shell { display: grid; grid-template-columns: minmax(0, 1fr); min-height: calc(100vh - 72px); }
+      .shell.config-open { grid-template-columns: 320px minmax(0, 1fr); }
+      [hidden] { display: none !important; }
+      .page-header { min-height: 72px; padding: 16px 24px; display: flex; align-items: center; gap: 20px; border-bottom: 1px solid var(--line); }
+      .project-heading { min-width: 0; flex: 1; }
+      #project-title { margin: 0; font-size: 19px; overflow-wrap: anywhere; }
+      #project-branch { display: block; color: var(--muted); font-size: 12px; margin-top: 4px; overflow-wrap: anywhere; }
+      .page-header button { width: auto; margin: 0; white-space: nowrap; }
       aside { padding: 34px 26px; background: var(--panel); border-right: 1px solid var(--line); }
-      h1 { margin: 0 0 10px; font: 900 27px "Archivo Black", system-ui; letter-spacing: -.03em; }
+      h1 { margin: 0 0 10px; font: 700 21px system-ui; letter-spacing: -.03em; }
       .lede { margin: 0 0 30px; color: var(--muted); font-size: 13px; line-height: 1.6; }
       label { display: block; margin: 18px 0 7px; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
       input, button, select { width: 100%; border: 1px solid var(--line); border-radius: 9px; padding: 11px 12px; background: #0b1119; color: var(--fg); font: inherit; }
       button { margin-top: 18px; background: var(--accent); border-color: var(--accent); color: #211705; font-weight: 700; cursor: pointer; }
-      button.secondary { background: transparent; border-color: #53677d; color: var(--fg); }
+      button.secondary { background: transparent; border-color: var(--line); color: var(--fg); }
+      button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
       button:disabled { opacity: .5; cursor: wait; }
-      #status { min-height: 44px; margin-top: 20px; color: var(--muted); font-size: 12px; line-height: 1.55; }
-      main { padding: 28px; display: flex; flex-direction: column; gap: 18px; min-width: 0; }
-      .stage { width: 100%; aspect-ratio: 16 / 9; background: #0b1017; border: 1px solid var(--line); border-radius: 16px; overflow: hidden; box-shadow: 0 28px 80px rgba(0,0,0,.35); }
+      #status, #export-status, #player-status { color: var(--muted); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
+      #status { min-height: 44px; margin-top: 20px; }
+      #export-status:empty, #player-status:empty { display: none; }
+      main { padding: 24px; display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+      .stage { width: 100%; aspect-ratio: 16 / 9; background: #0b1017; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
       canvas { display: block; width: 100%; height: 100%; }
-      .toolbar { display: flex; align-items: center; gap: 14px; }
-      .toolbar button { width: auto; min-width: 110px; margin: 0; }
-      input[type="range"] { flex: 1; padding: 0; accent-color: var(--accent); }
-      #time-label { width: 100px; color: var(--muted); font-size: 12px; text-align: right; }
-      .summary { display: flex; gap: 12px; flex-wrap: wrap; }
-      .stat { padding: 12px 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
-      .stat strong { display: block; margin-bottom: 4px; font-size: 20px; color: var(--accent); }
+      .player { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+      .toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+      .toolbar button { width: auto; margin: 0; padding: 9px 12px; white-space: nowrap; }
+      input[type="range"] { flex: 1; min-width: 100px; width: auto; padding: 0; accent-color: var(--accent); }
+      #time-label { width: 110px; flex-shrink: 0; font-family: ui-monospace, monospace; color: var(--muted); font-size: 12px; text-align: right; }
+      .overview h2 { margin: 0 0 12px; font-size: 13px; color: var(--muted); font-weight: 500; }
+      .summary { display: flex; gap: 12px 26px; flex-wrap: wrap; }
+      .summary .stat { padding: 0; border: 0; background: none; display: flex; gap: 8px; align-items: baseline; }
+      .summary .stat strong { margin: 0; font-size: 16px; }
+      .stat { padding: 12px 16px; background: transparent; border: 1px solid var(--line); border-radius: 6px; }
+      .stat strong { display: block; margin-bottom: 4px; font-size: 20px; color: var(--fg); font-family: ui-monospace, monospace; }
       .stat span { color: var(--muted); font-size: 11px; }
       #accounts { border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
       .account-row { display: grid; grid-template-columns: minmax(180px,1fr) minmax(160px,1fr) auto; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--line); align-items: center; }
@@ -40,16 +54,29 @@
       #account-status { font-size: 12px; color: var(--muted); }
       @media (max-width: 1100px) { .account-row { grid-template-columns: 1fr; } .account-row select { grid-column: 1; } }
       a { color: var(--accent); }
-      .path-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
-      .path-row button { width: auto; margin: 0; white-space: nowrap; }
+      .path-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+      #source, #remote-source, #branch, #time-zone, input[type="number"] { font-family: ui-monospace, monospace; min-width: 0; }
+      .path-row button { width: auto; margin: 0; justify-self: end; padding: 7px 10px; font-size: 12px; white-space: nowrap; }
       details { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 15px; }
       summary { color: var(--muted); font-size: 12px; cursor: pointer; }
       details label:first-of-type { margin-top: 16px; }
+      .focus-mode .support { display: none; }
+      .focus-mode .player { width: min(100%, calc((100dvh - 200px) * 16 / 9)); align-self: center; }
+      .player:fullscreen { background: var(--bg); width: 100vw; height: 100dvh; padding: 24px; justify-content: center; align-items: center; overflow: auto; --controls-height: 180px; }
+      .player:fullscreen .stage { flex-shrink: 0; width: min(100%, calc((100dvh - var(--controls-height)) * 16 / 9)); }
+      .player:fullscreen .toolbar, .player:fullscreen #export-status, .player:fullscreen #player-status { width: 100%; }
+      @media (max-width: 999px) { .shell.config-open { grid-template-columns: minmax(0, 1fr); } aside { border-right: 0; border-bottom: 1px solid var(--line); } }
+      @media (max-width: 1100px) { .toolbar input[type="range"] { flex-basis: 100%; order: 2; } }
+      @media (max-width: 600px) { main { padding: 16px; } .page-header { padding: 16px; gap: 12px; } .toolbar { gap: 8px; } .toolbar button { padding: 8px 10px; } #time-label { margin-left: auto; } .account-actions { flex-wrap: wrap; } .player:fullscreen { padding: 16px; --controls-height: 240px; } }
     </style>
   </head>
   <body>
-    <div class="shell">
-      <aside>
+    <header class="page-header">
+      <div class="project-heading"><h1 id="project-title">Git History</h1><span id="project-branch"></span></div>
+      <button id="toggle-config" class="secondary" aria-controls="config-panel" aria-expanded="true">仓库配置</button>
+    </header>
+    <div class="shell config-open">
+      <aside id="config-panel">
         <h1>Git History</h1>
         <p class="lede">用开发者球群展示累计改动，用时间环展示提交时刻。首选输入本地 Git 路径：速度快，也不需要 GitLab Token。</p>
         <form id="form">
@@ -72,16 +99,28 @@
           <input id="max-authors" type="number" min="1" max="32" value="16" />
           <button id="analyze">生成可视化</button>
         </form>
-        <button id="export" class="secondary" disabled>导出 MP4</button>
-        <div id="status">等待导入仓库。</div>
+        <div id="status" role="status">等待导入仓库。</div>
       </aside>
       <main>
-        <div class="stage"><canvas id="preview" width="1920" height="1080"></canvas></div>
-        <div class="toolbar"><button id="play" class="secondary">播放</button><input id="scrub" type="range" min="0" max="60" step="0.01" value="0" /><span id="time-label">0.0s / 60s</span></div>
-        <div id="summary" class="summary"></div>
-        <div id="author-detail" class="stat"><span id="author-stats">点击开发者球查看累计改动与合并分组。</span><details id="merge-details" hidden><summary></summary><div id="merge-groups"></div></details></div>
-        <details id="accounts"><summary>账号关联（配置后点击“生成可视化”生效）</summary><p id="account-status"></p><div id="account-list"></div></details>
-        <p class="lede">改动量不等于贡献质量；合并提交与冲突解决改动不单独计入。Squash 仅展示保留的提交和作者。</p>
+        <section id="player" class="player" aria-label="历史播放器">
+          <div class="stage"><canvas id="preview" width="1920" height="1080"></canvas></div>
+          <div class="toolbar">
+            <button id="play" class="secondary">播放</button>
+            <input id="scrub" aria-label="播放进度" type="range" min="0" max="60" step="0.01" value="0" />
+            <span id="time-label">0.0s / 60s</span>
+            <button id="focus-view" class="secondary" aria-pressed="false">专注观看</button>
+            <button id="fullscreen" class="secondary" aria-pressed="false">全屏</button>
+            <button id="export" class="secondary" disabled>导出 MP4</button>
+          </div>
+          <div id="export-status" role="status"></div>
+          <div id="player-status" role="status"></div>
+        </section>
+        <section class="overview support" aria-label="项目概览">
+          <h2>项目概览</h2><div id="summary" class="summary"></div>
+          <details id="statistics-details"><summary>统计详情</summary><p id="extra-stats"></p><p class="lede">改动量不等于贡献质量；合并提交与冲突解决改动不单独计入。Squash 仅展示保留的提交和作者。</p></details>
+        </section>
+        <div id="author-detail" class="stat support"><span id="author-stats">点击开发者球查看累计改动与最终存留。</span></div>
+        <details id="accounts" class="support"><summary>账号关联（配置后点击“生成可视化”生效）</summary><p id="account-status"></p><div id="account-list"></div></details>
       </main>
     </div>
     <script src="./data/manifest.js"></script>

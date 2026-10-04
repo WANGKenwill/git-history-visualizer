@@ -1,0 +1,30 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+test('setup prepares dependencies before starting and stops on missing prerequisites or install failure',t=>{
+  const root=mkdtempSync(join(tmpdir(),'history-setup-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
+  const scripts=join(root,'scripts'),bin=join(root,'bin'),pw=join(root,'node_modules/playwright'),log=join(root,'calls.jsonl');
+  for(const dir of [scripts,bin,pw])mkdirSync(dir,{recursive:true});
+  cpSync(new URL('../scripts/setup.mjs',import.meta.url),join(scripts,'setup.mjs'));
+  for(const command of ['git','ffmpeg','ffprobe'])writeFileSync(join(bin,command),'#!/bin/sh\nexit 0\n',{mode:0o755});
+  const record="require('node:fs').appendFileSync(process.env.SETUP_LOG,JSON.stringify(process.argv.slice(2))+'\\n');";
+  const npmCli=join(root,'npm.cjs');writeFileSync(npmCli,record+"if(process.env.FAIL_INSTALL)process.exit(1);");
+  writeFileSync(join(pw,'package.json'),JSON.stringify({name:'playwright',type:'module',exports:'./index.js'}));
+  writeFileSync(join(pw,'index.js'),`export const chromium={executablePath:()=>${JSON.stringify(join(root,'chromium'))}};`);
+  writeFileSync(join(pw,'cli.js'),`import {writeFileSync,appendFileSync} from 'node:fs';appendFileSync(process.env.SETUP_LOG,JSON.stringify(process.argv.slice(2))+'\\n');writeFileSync(${JSON.stringify(join(root,'chromium'))},'browser');`);
+  writeFileSync(join(scripts,'server.mjs'),`import {appendFileSync} from 'node:fs';appendFileSync(process.env.SETUP_LOG,JSON.stringify(['server',...process.argv.slice(2)])+'\\n');`);
+  const env={...process.env,PATH:bin,npm_execpath:npmCli,SETUP_LOG:log};
+  const run=(args=[],extra={})=>spawnSync(process.execPath,[join(scripts,'setup.mjs'),...args],{env:{...env,...extra},encoding:'utf8'});
+  const calls=()=>readFileSync(log,'utf8').trim().split('\n').map(line=>JSON.parse(line));
+  let result=run(['--start','--no-open']);assert.equal(result.status,0,result.stderr);
+  assert.deepEqual(calls(),[['ci'],['install','chromium'],['server','--no-open']]);
+  writeFileSync(log,'');result=run();assert.equal(result.status,0,result.stderr);assert.deepEqual(calls(),[['ci']]);
+  writeFileSync(log,'');result=run(['--start'],{FAIL_INSTALL:'1'});
+  assert.equal(result.status,1);assert.match(result.stderr,/依赖准备失败/);assert.deepEqual(calls(),[['ci']]);
+  writeFileSync(log,'');rmSync(join(bin,'git'));result=run();
+  assert.equal(result.status,1);assert.match(result.stderr,/缺少 Git/);assert.equal(readFileSync(log,'utf8'),'');
+});

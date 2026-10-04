@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {execFileSync} from 'node:child_process';
+import childProcess, {execFileSync} from 'node:child_process';
+import {syncBuiltinESMExports} from 'node:module';
 import {mkdtempSync,writeFileSync,mkdirSync,rmSync,symlinkSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join,dirname} from 'node:path';
@@ -25,55 +26,73 @@ function check(m) {
   assert.equal(historyState(m,m.duration).retainedLines,sum);
 }
 
-test('rewrites and deletions update earlier retention; renamed files, blank lines and no newline are counted',t=>{
+test('rewrites and deletions update earlier retention; renamed files, blank lines and no newline are counted',async t=>{
   const f=fixture(t);f.write('old.txt','a\n\nb');const first=f.commit();
-  const before=analyzeHistory({repo:f.repo,duration:15});assert.equal(before.retention.totalLines,3);
+  const before=(await analyzeHistory({repo:f.repo,duration:15}));assert.equal(before.retention.totalLines,3);
   f.git('mv','old.txt','new.txt');const rename=f.commit();
   f.git('config','user.name','B');f.git('config','user.email','b@test');f.write('new.txt','changed\n\nb\nnew\n');const rewrite=f.commit();
-  const m=analyzeHistory({repo:f.repo,previousManifest:before,duration:15});check(m);
+  const m=(await analyzeHistory({repo:f.repo,previousManifest:before,duration:15}));check(m);
   assert.equal(m.commits.find(c=>c.sha===first).retainedLines,1);assert.equal(m.commits.find(c=>c.sha===rename).retainedLines,0);assert.equal(m.commits.find(c=>c.sha===rewrite).retainedLines,3);
-  f.write('new.txt','changed\nnew\n');f.commit();const deleted=analyzeHistory({repo:f.repo,previousManifest:m});check(deleted);
+  f.write('new.txt','changed\nnew\n');f.commit();const deleted=(await analyzeHistory({repo:f.repo,previousManifest:m}));check(deleted);
   assert.equal(deleted.commits.find(c=>c.sha===first).retainedLines,0);assert.equal(deleted.retention.totalLines,2);
 });
 
-test('Unicode, tabs, newlines, binary and files originally excluded preserve exact paths',t=>{
+test('Unicode, tabs, newlines, binary and files originally excluded preserve exact paths',async t=>{
   const f=fixture(t);for(const name of ['中文.txt','a\tb.txt','a\nb.txt','a"b.txt'])f.write(name,'one\ntwo');
   f.write('vendor/old.txt','ignored\n');f.write('blob.bin',Buffer.from([0,1,2]));const first=f.commit();
-  f.git('mv','vendor/old.txt','imported.txt');f.commit();const m=analyzeHistory({repo:f.repo});check(m);
+  f.git('mv','vendor/old.txt','imported.txt');f.commit();const m=(await analyzeHistory({repo:f.repo}));check(m);
   assert.equal(m.retention.totalLines,9);assert.equal(m.retention.unmappedLines,1);assert.equal(m.commits.find(c=>c.sha===first).retainedLines,8);
 });
 
-test('merge resolution stays unmapped, ordinary branch commits map, squash only attributes the surviving commit',t=>{
+test('divergent renames count each original line once and keep duplicate HEAD lines unmapped',async t=>{
+  const f=fixture(t);f.write('source.txt','one\ntwo\nthree\nfour\nfive\nsix\n');const first=f.commit();
+  const before=(await analyzeHistory({repo:f.repo}));
+  f.git('checkout','-b','feature');f.git('mv','source.txt','feature.txt');f.commit();
+  f.git('checkout','main');f.git('mv','source.txt','main.txt');f.commit();
+  try {f.git('merge','--no-ff','feature','-m','合并');}catch {f.git('add','-A');f.commit();}
+  const merged=(await analyzeHistory({repo:f.repo,previousManifest:before}));check(merged);
+  assert.equal(merged.commits.find(c=>c.sha===first).retainedLines,6);
+  assert.equal(merged.retention.totalLines,12);assert.equal(merged.retention.mappedLines,6);assert.equal(merged.retention.unmappedLines,6);
+  f.write('main.txt','three\nfour\nfive\nsix\n');f.write('feature.txt','one\ntwo\nthree\nfour\n');f.commit();
+  const m=(await analyzeHistory({repo:f.repo,previousManifest:merged}));check(m);
+  assert.equal(m.commits.find(c=>c.sha===first).retainedLines,6);
+  assert.equal(m.retention.totalLines,8);assert.equal(m.retention.mappedLines,6);assert.equal(m.retention.unmappedLines,2);
+  const cached=(await analyzeHistory({repo:f.repo,previousManifest:m}));assert(cached.analysis.retentionCacheHit);assert.deepEqual(cached.retention,m.retention);
+  const legacy=structuredClone(m);legacy.retention.version=1;legacy.commits.find(c=>c.sha===first).retainedLines=5;
+  const rebuilt=(await analyzeHistory({repo:f.repo,previousManifest:legacy}));assert(!rebuilt.analysis.retentionCacheHit);assert.deepEqual(rebuilt.retention,m.retention);
+});
+
+test('merge resolution stays unmapped, ordinary branch commits map, squash only attributes the surviving commit',async t=>{
   const f=fixture(t);f.write('conflict.txt','base\n');f.commit();
   f.git('checkout','-b','feature');f.write('conflict.txt','feature\n');f.write('feature.txt','kept\n');const feature=f.commit();
   f.git('checkout','main');f.write('conflict.txt','main\n');f.commit();
   assert.throws(()=>f.git('merge','--no-ff','feature','-m','合并'));f.write('conflict.txt','resolved\n');const merge=f.commit();
-  let m=analyzeHistory({repo:f.repo});check(m);assert.equal(m.retention.unmappedLines,1);assert.equal(m.commits.find(c=>c.sha===feature).retainedLines,1);assert(!m.commits.some(c=>c.sha===merge));
+  let m=(await analyzeHistory({repo:f.repo}));check(m);assert.equal(m.retention.unmappedLines,1);assert.equal(m.commits.find(c=>c.sha===feature).retainedLines,1);assert(!m.commits.some(c=>c.sha===merge));
   f.git('checkout','-b','squash');f.write('squash.txt','squash\n');const lost=f.commit();f.git('checkout','main');f.git('merge','--squash','squash');const kept=f.commit();
-  m=analyzeHistory({repo:f.repo,previousManifest:m});check(m);assert(!m.commits.some(c=>c.sha===lost));assert.equal(m.commits.find(c=>c.sha===kept).retainedLines,1);
+  m=(await analyzeHistory({repo:f.repo,previousManifest:m}));check(m);assert(!m.commits.some(c=>c.sha===lost));assert.equal(m.commits.find(c=>c.sha===kept).retainedLines,1);
 });
 
-test('cache reuse ignores display settings; legacy retention is rebuilt; changed head and exclusions invalidate',t=>{
-  const f=fixture(t);f.write('a.txt','a\n');f.commit();let m=analyzeHistory({repo:f.repo});
-  const cached=analyzeHistory({repo:f.repo,previousManifest:m,duration:15,timeZone:'UTC',maxAuthors:1});assert(cached.analysis.retentionCacheHit);
+test('cache reuse ignores display settings; legacy retention is rebuilt; changed head and exclusions invalidate',async t=>{
+  const f=fixture(t);f.write('a.txt','a\n');f.commit();let m=(await analyzeHistory({repo:f.repo}));
+  const cached=(await analyzeHistory({repo:f.repo,previousManifest:m,duration:15,timeZone:'UTC',maxAuthors:1}));assert(cached.analysis.retentionCacheHit);
   const old=structuredClone(m);delete old.retention;for(const c of old.commits)delete c.retainedLines;
-  const rebuilt=analyzeHistory({repo:f.repo,previousManifest:old});assert(!rebuilt.analysis.retentionCacheHit);assert(rebuilt.analysis.cacheHit);check(rebuilt);
-  f.write('a.txt','updated\n');f.commit();m=analyzeHistory({repo:f.repo,previousManifest:m});assert(!m.analysis.retentionCacheHit);check(m);
-  f.git('reset','--hard','HEAD~1');const reset=analyzeHistory({repo:f.repo,previousManifest:m});assert(!reset.analysis.retentionCacheHit);check(reset);
-  const excluded=analyzeHistory({repo:f.repo,previousManifest:reset,excludes:['**/*.txt']});assert(!excluded.analysis.retentionCacheHit);assert.equal(excluded.retention.totalLines,0);
-  const unchanged=structuredClone(m);assert.throws(()=>analyzeRetention(f.repo,'invalid',[], '[]',()=>false,m));assert.deepEqual(m,unchanged);
+  const rebuilt=(await analyzeHistory({repo:f.repo,previousManifest:old}));assert(!rebuilt.analysis.retentionCacheHit);assert(rebuilt.analysis.cacheHit);check(rebuilt);
+  f.write('a.txt','updated\n');f.commit();m=(await analyzeHistory({repo:f.repo,previousManifest:m}));assert(!m.analysis.retentionCacheHit);check(m);
+  f.git('reset','--hard','HEAD~1');const reset=(await analyzeHistory({repo:f.repo,previousManifest:m}));assert(!reset.analysis.retentionCacheHit);check(reset);
+  const excluded=(await analyzeHistory({repo:f.repo,previousManifest:reset,excludes:['**/*.txt']}));assert(!excluded.analysis.retentionCacheHit);assert.equal(excluded.retention.totalLines,0);
+  const unchanged=structuredClone(m);await assert.rejects(()=>analyzeRetention(f.repo,'invalid',[], '[]',()=>false,m));assert.deepEqual(m,unchanged);
 });
 
-test('inner area shares the churn scale, follows absorption growth, aliases and other; seeking is deterministic',t=>{
+test('inner area shares the churn scale, follows absorption growth, aliases and other; seeking is deterministic',async t=>{
   const f=fixture(t);f.write('a.txt','a\nb\n');f.commit();f.git('config','user.name','B');f.git('config','user.email','b@test');f.write('b.txt','c\n');f.commit();
-  const m=analyzeHistory({repo:f.repo,duration:15,accountLinks:{'b@test':'a@test'}});const scene=prepareHistory(m);assert.equal(scene.nodes.length,1);
+  const m=(await analyzeHistory({repo:f.repo,duration:15,accountLinks:{'b@test':'a@test'}}));const scene=prepareHistory(m);assert.equal(scene.nodes.length,1);
   const arrival=scene.arrivals[0].arrival;assert.equal(historyState(m,arrival-.01).retainedLines,0);assert.equal(historyState(m,arrival).nodes[0].visualRetainedLines,0);
   const mid=historyState(m,arrival+.175).nodes[0];assert(Math.abs(mid.visualRetainedLines-scene.arrivals[0].retainedLines*.5)<1e-8);
   const final=historyState(m,15).nodes[0];assert.equal(final.retainedLines,3);assert.equal(final.finalRetainedLines,3);
   const circles=[];const ctx=new Proxy({arc(x,y,r){circles.push(r);},createRadialGradient:()=>({addColorStop(){}}),measureText:text=>({width:text.length*9})},{get:(o,k)=>k in o?o[k]:()=>{}});
   drawHistory(ctx,m,15);assert(circles.some(r=>Math.abs(r-final.radius*Math.sqrt(final.visualRetainedLines/final.finalChurn))<1e-8));
   const direct=historyState(m,5);for(let time=0;time<15;time+=.1)historyState(m,time);assert.deepEqual(historyState(m,5),direct);historyState(m,1);assert.deepEqual(historyState(m,5),direct);
-  const other=analyzeHistory({repo:f.repo,previousManifest:m,accountLinks:{},maxAuthors:1});assert.equal(prepareHistory(other).nodes.find(n=>n.id==='__other__').retainedLines,1);check(other);
+  const other=(await analyzeHistory({repo:f.repo,previousManifest:m,accountLinks:{},maxAuthors:1}));assert.equal(prepareHistory(other).nodes.find(n=>n.id==='__other__').retainedLines,1);check(other);
   const legacy=structuredClone(m);delete legacy.retention;assert.equal(historyState(legacy,15).retentionAvailable,false);
 });
 
@@ -92,8 +111,29 @@ test('33-node dense history renders zero cores, preserves motion, and totals exa
 });
 
 
-test('symlinks and submodules are not text files in the retention inventory',t=>{
+test('symlinks and submodules are not text files in the retention inventory',async t=>{
   const f=fixture(t);f.write('regular.txt','one\n');f.commit();symlinkSync('regular.txt',join(f.repo,'link'));f.commit();
   f.git('update-index','--add','--cacheinfo',`160000,${f.git('rev-parse','HEAD')},submodule`);f.git('commit','-m','添加子模块指针');
-  const m=analyzeHistory({repo:f.repo});check(m);assert.equal(m.retention.totalLines,1);
+  const m=(await analyzeHistory({repo:f.repo}));check(m);assert.equal(m.retention.totalLines,1);
+});
+
+
+test('blame uses at most four concurrent processes and waits for in-flight work after failure',async t=>{
+  const f=fixture(t);for(let i=0;i<12;i++)f.write(`file${i}.txt`,`${i}\n`);f.commit();
+  const real=childProcess.execFile;let active=0,maximum=0,fail=false,calls=0;
+  t.mock.method(childProcess,'execFile',(command,args,options,callback)=>{
+    active++;maximum=Math.max(maximum,active);calls++;
+    const shouldFail=fail&&calls===1;
+    return real(command,args,options,(error,stdout,stderr)=>setTimeout(()=>{
+      active--;callback(shouldFail?new Error('模拟 blame 失败'):error,stdout,stderr);
+    },10));
+  });
+  syncBuiltinESMExports();
+  try {
+    const m=await analyzeHistory({repo:f.repo});check(m);assert.equal(m.retention.mappedLines,12);
+    assert.equal(maximum,4);assert.equal(active,0);assert.equal(calls,12);
+    fail=true;calls=0;maximum=0;
+    await assert.rejects(()=>analyzeHistory({repo:f.repo}),/模拟 blame 失败/);
+    assert.equal(active,0);assert(maximum<=4);assert(calls<12);
+  } finally {t.mock.restoreAll();syncBuiltinESMExports();}
 });

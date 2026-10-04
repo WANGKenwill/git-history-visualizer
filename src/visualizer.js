@@ -192,7 +192,7 @@ export function historyState(manifest, time) {
     value.retainedLines += retained; value.visualRetainedLines += retained * (growth * growth * (3 - 2 * growth));
     retainedLines += retained; churn += commit.churn;
   }
-  return { churn, retainedLines, retentionAvailable: manifest.retention?.version === 1, nodes: scene.nodes.map((n, i) => ({ ...n, ...motionPosition(scene.motion, i, time), finalRetainedLines: n.retainedLines || 0, ...totals.get(n.id), safeRadius: safetyRadius(n, totals.get(n.id).visualChurn, time-totals.get(n.id).lastArrival) })), particles: scene.particles };
+  return { churn, retainedLines, retentionAvailable: [1,2].includes(manifest.retention?.version), nodes: scene.nodes.map((n, i) => ({ ...n, ...motionPosition(scene.motion, i, time), finalRetainedLines: n.retainedLines || 0, ...totals.get(n.id), safeRadius: safetyRadius(n, totals.get(n.id).visualChurn, time-totals.get(n.id).lastArrival) })), particles: scene.particles };
 }
 
 function curve(path, p) {

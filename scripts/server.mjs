@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { execFile, execFileSync } from "node:child_process";
 import { createServer } from "node:http";
-import { chmodSync, mkdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { analyzeHistory } from "./analyze-history.mjs";
@@ -11,7 +11,11 @@ const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const cacheDir = join(root, ".cache", "repositories");
 const exportDir = join(root, "exports");
 const manifestCacheDir = join(root, ".cache", "manifests");
-const dataDir = join(root, "data");
+const dataDir = join(root, ".cache", "current");
+const browserAssets = new Set([
+  "/studio.html", "/index.html", "/data/manifest.js",
+  "/src/studio.js", "/src/visualizer.js", "/src/motion.js", "/src/accounts.js",
+]);
 mkdirSync(cacheDir, { recursive: true });
 mkdirSync(exportDir, { recursive: true });
 mkdirSync(manifestCacheDir, { recursive: true });
@@ -62,23 +66,20 @@ function resolveBranch(repo, requested) {
 function cloneRepository(source, token, branch) {
   const key = createHash("sha256").update(`${source}\0${token ? "token" : "public"}`).digest("hex").slice(0, 16);
   const target = join(cacheDir, key);
-  const askpass = join(cacheDir, `${key}-askpass.sh`);
   const env = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
+  const authArgs = token ? ["-c", "credential.helper="] : [];
   if (token) {
-    writeFileSync(askpass, `#!/bin/sh\ncase "$1" in *Username*) printf '%s' oauth2 ;; *) printf '%s' '${token.replaceAll("'", "'\\''")}' ;; esac\n`);
-    chmodSync(askpass, 0o700);
-    env.GIT_ASKPASS = askpass;
+    env.GIT_ASKPASS = join(root, "scripts", "git-askpass.sh");
+    env.GIT_HISTORY_TOKEN = token;
   }
   try {
-    try {
-      statSync(join(target, ".git"));
-      execFileSync("git", ["-C", target, "fetch", "--no-tags", "origin", `+${branch}:refs/remotes/origin/${branch}`], { stdio: "ignore", env });
-      return target;
-    } catch {}
-    try { rmSync(target, { recursive: true, force: true }); } catch {}
-    execFileSync("git", ["clone", "--no-tags", "--single-branch", "--branch", branch, source, target], { stdio: "pipe", maxBuffer: 4 * 1024 * 1024, env });
+    statSync(join(target, ".git"));
+    execFileSync("git", [...authArgs, "-C", target, "fetch", "--no-tags", "origin", `+${branch}:refs/remotes/origin/${branch}`], { stdio: "ignore", env });
     return target;
-  } finally { if (token) { try { unlinkSync(askpass); } catch {} } }
+  } catch {}
+  try { rmSync(target, { recursive: true, force: true }); } catch {}
+  execFileSync("git", [...authArgs, "clone", "--no-tags", "--single-branch", "--branch", branch, source, target], { stdio: "pipe", maxBuffer: 4 * 1024 * 1024, env });
+  return target;
 }
 
 async function analyze(body) {
@@ -94,7 +95,7 @@ async function analyze(body) {
   let previousManifest = null;
   try { previousManifest = JSON.parse(readFileSync(cachePath, "utf8")); } catch {}
   if (remote && previousManifest?.project.branch === branch) previousManifest.project.branch = resolvedBranch;
-  const manifest = analyzeHistory({ repo, branch: resolvedBranch, duration, projectName: basename(repo), previousManifest, timeZone: String(body.timeZone || "Asia/Shanghai"), maxAuthors: body.maxAuthors, accountLinks: body.accountLinks });
+  const manifest = await analyzeHistory({ repo, branch: resolvedBranch, duration, projectName: basename(repo), previousManifest, timeZone: String(body.timeZone || "Asia/Shanghai"), maxAuthors: body.maxAuthors, accountLinks: body.accountLinks });
   manifest.project.source = source;
   writeFileSync(cachePath, `${JSON.stringify(manifest, null, 2)}\n`);
   writeFileSync(join(dataDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
@@ -150,19 +151,18 @@ const server = createServer(async (request, response) => {
         return response.end();
       } finally { exporting = false; }
     }
-    let file = url.pathname === "/" ? "/studio.html" : url.pathname;
-    if (file.startsWith("/exports/")) {
-      const target = join(root, file);
-      let content;
-      try { content = readFileSync(target); } catch { return json(response, 404, { ok: false, error: "文件不存在" }); }
-      response.writeHead(200, { "content-type": "video/mp4", "cache-control": "no-store" });
-      return response.end(content);
-    }
-    const target = resolve(root, `.${file}`);
-    if (!target.startsWith(root)) return json(response, 403, { error: "禁止访问" });
+    const file = url.pathname === "/" ? "/studio.html" : decodeURIComponent(url.pathname);
+    const video = /^\/exports\/[^/\\]+\.mp4$/.test(file);
+    if (!browserAssets.has(file) && !video) return json(response, 403, { ok: false, error: "禁止访问" });
+    if (request.method !== "GET" && request.method !== "HEAD") return json(response, 405, { ok: false, error: "不支持的请求方法" });
+    const currentManifest = join(dataDir, "manifest.js");
+    const target = file === "/data/manifest.js" && existsSync(currentManifest) ? currentManifest : resolve(root, `.${file}`);
     let content;
-    try { content = readFileSync(target); } catch { return json(response, 404, { ok: false, error: "文件不存在" }); }
-    response.writeHead(200, { "content-type": contentType(target) });
+    try {
+      if (realpathSync(target) !== target) return json(response, 403, { ok: false, error: "禁止访问" });
+      content = readFileSync(target);
+    } catch { return json(response, 404, { ok: false, error: "文件不存在" }); }
+    response.writeHead(200, { "content-type": video ? "video/mp4" : contentType(target), "cache-control": "no-store" });
     return response.end(content);
   } catch (error) {
     return json(response, 400, { ok: false, error: error instanceof Error ? error.message : String(error) });

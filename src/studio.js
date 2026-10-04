@@ -9,6 +9,42 @@ function tick(now) { if (playing) { if (!lastFrame) lastFrame = now; time += (no
 let selectedAuthor = null;
 let loadedSource = manifest.project.source || manifest.project.repo;
 let draftLinks = accountLinks(manifest.authors, manifest.settings?.accountLinks);
+let configOpen = !(manifest.version === 2 && manifest.commits.length);
+let focused = false;
+function showConfig() {
+  $('#config-panel').hidden = focused || !configOpen;
+  $('.shell').classList.toggle('config-open', !focused && configOpen);
+  $('#toggle-config').setAttribute('aria-expanded', String(!focused && configOpen));
+  $('#toggle-config').disabled = focused;
+}
+function handleConfigToggle() { configOpen = !configOpen; showConfig(); }
+function handleFocusView() {
+  focused = !focused;
+  document.body.classList.toggle('focus-mode', focused);
+  $('#focus-view').textContent = focused ? '退出专注' : '专注观看';
+  $('#focus-view').setAttribute('aria-pressed', String(focused));
+  showConfig();
+}
+async function handleFullscreen() {
+  $('#player-status').textContent = '';
+  try {
+    if (document.fullscreenElement === $('#player')) await document.exitFullscreen();
+    else await $('#player').requestFullscreen();
+  } catch (error) { $('#player-status').textContent = `无法切换全屏：${error.message}`; }
+}
+function showFullscreen() {
+  const fullscreen = document.fullscreenElement === $('#player');
+  $('#fullscreen').textContent = fullscreen ? '退出全屏' : '全屏';
+  $('#fullscreen').setAttribute('aria-pressed', String(fullscreen));
+}
+function handleFullscreenKey(event) {
+  if (event.key === 'Escape' && document.fullscreenElement === $('#player')) handleFullscreen();
+}
+function showHeading() {
+  $('#project-title').textContent = manifest.version === 2 && manifest.commits.length ? manifest.project.name : 'Git History';
+  $('#project-branch').textContent = manifest.version === 2 && manifest.commits.length ? manifest.project.branch : '';
+}
+
 function showAccounts() {
   const list = $('#account-list'); list.replaceChildren();
   const roots = manifest.authors.filter(a => !draftLinks[a.id]);
@@ -23,7 +59,7 @@ function showAccounts() {
     const chooser=document.createElement('select'); chooser.hidden=true; chooser.setAttribute('aria-label',`将 ${author.id} 关联到主账号`);
     const placeholder=document.createElement('option'); placeholder.value='';placeholder.textContent='选择主账号…';chooser.append(placeholder);
     for (const main of roots.filter(a=>a.id!==root)) { const option=document.createElement('option');option.value=main.id;option.textContent=`${main.name} · ${main.email || main.id}`;chooser.append(option); }
-    const apply=(action,target)=>{ draftLinks=changeAccount(manifest.authors,draftLinks,author.id,action,target);showAccounts();$('#account-status').textContent='关联配置已修改，点击左侧“生成可视化”后生效并保存。';$('#export').disabled=true; };
+    const apply=(action,target)=>{ draftLinks=changeAccount(manifest.authors,draftLinks,author.id,action,target);showAccounts();$('#account-status').textContent='关联配置已修改，点击仓库配置中的“生成可视化”后生效并保存。';$('#export').disabled=true; };
     chooser.addEventListener('change',()=>{if(chooser.value)apply('link',chooser.value);});
     for (const [title,action,disabled] of [['关联到','link',roots.every(a=>a.id===root)],['解除关联','unlink',root===author.id],['设为主账号','primary',root===author.id]]) {
       const button=document.createElement('button');button.type='button';button.className='secondary';button.textContent=title;button.disabled=disabled;
@@ -34,24 +70,15 @@ function showAccounts() {
   $('#account-status').textContent=`${manifest.authors.length} 个账号 → ${roots.length} 位开发者。关联主账号会将该组一起归入目标主账号；解除关联仅拆出当前账号。`;
 }
 function showDetail() {
-  const stats = $("#author-stats"), details = $("#merge-details"), list = $("#merge-groups");
+  const stats = $("#author-stats");
   const node = selectedAuthor && historyState(manifest,time).nodes.find(n=>n.id===selectedAuthor && n.commitCount);
-  if (!node) { stats.textContent = "点击开发者球查看累计改动与合并分组。"; details.hidden = true; details.open = false; details.dataset.groups = ''; list.replaceChildren(); return; }
-  const groups = [...new Set(prepareHistory(manifest).arrivals.filter(c => c.arrival <= time && c.displayAuthorId === node.id).flatMap(c=>c.groupIds))];
+  if (!node) { stats.textContent = "点击开发者球查看累计改动与最终存留。"; return; }
   stats.textContent = `${node.name} · 新增 ${node.additions.toLocaleString()} / 删除 ${node.deletions.toLocaleString()} / 改动 ${node.churn.toLocaleString()} · 占当前累计改动 ${(node.churn / Math.max(1, currentChurn) * 100).toFixed(1)}% · ${node.commitCount} 个提交`;
-  if (manifest.retention?.version === 1) {
+  if ([1,2].includes(manifest.retention?.version)) {
     stats.append(` · 当前已呈现的最终存留 ${node.retainedLines.toLocaleString()} / 作者最终存留 ${node.finalRetainedLines.toLocaleString()} · 作者占项目最终存留 ${(node.finalRetainedLines / Math.max(1,manifest.retention.totalLines) * 100).toFixed(1)}%`);
     if(manifest.retention.unmappedLines)stats.append(` · 项目有 ${manifest.retention.unmappedLines.toLocaleString()} 行未纳入贡献事件`);
   } else stats.append(' · 最终存留未分析，请重新生成');
-  details.hidden = !groups.length;
-  if (!groups.length) details.open = false;
-  const groupKey = JSON.stringify(groups);
-  if (details.dataset.groups !== groupKey) {
-    details.dataset.groups = groupKey;
-    details.querySelector('summary').textContent = `查看 ${groups.length} 个合并组`;
-    list.replaceChildren();
-    for (const id of groups) { const group = manifest.groups.find(g=>g.id===id); if(group) { const line = document.createElement('div'); line.textContent = `合并组 ${id.slice(0,7)}：${group.title}`; list.append(line); } }
-  }
+
 }
 let currentChurn = 0;
 function handleCanvasClick(event) {
@@ -60,10 +87,9 @@ function handleCanvasClick(event) {
   showDetail();
 }
 function showSummary() {
-  const values = [[manifest.commits.length, "非合并提交"], [prepareHistory(manifest).authors.length, "开发者"], [(manifest.totalChurn || 0).toLocaleString("zh-CN"), "累计改动行数"], [manifest.groups.length, "合并组"]];
-  values.push([manifest.retention?.version===1 ? manifest.retention.totalLines.toLocaleString('zh-CN') : '未分析', '最终存留行数']);
-  if(manifest.retention?.unmappedLines)values.push([manifest.retention.unmappedLines.toLocaleString('zh-CN'),'未纳入贡献事件']);
-  $("#summary").innerHTML = values.map(([value, label]) => `<div class="stat"><strong>${value}</strong><span>${label}</span></div>`).join("");
+  const values = [[(manifest.totalChurn || 0).toLocaleString('zh-CN'), '总变更'], [[1,2].includes(manifest.retention?.version) ? manifest.retention.totalLines.toLocaleString('zh-CN') : '未分析', '最终存留'], [manifest.commits.length, '非合并提交'], [prepareHistory(manifest).authors.length, '开发者']];
+  $('#summary').innerHTML = values.map(([value, label]) => `<div class="stat"><span>${label}</span><strong>${value}</strong></div>`).join('');
+  $('#extra-stats').textContent = `${[1,2].includes(manifest.retention?.version) ? (manifest.retention.unmappedLines || 0).toLocaleString('zh-CN')+' 行未纳入贡献事件' : '最终存留未分析'}`;
 }
 function handleLocalInput() {
   if ($("#source").value.trim()) {
@@ -116,9 +142,12 @@ async function handleGenerate(event) {
     $("#export").disabled = false;
     const cacheText = result.analysis?.cacheHit ? "命中缓存" : result.analysis?.incremental ? `增量分析 ${result.analysis.analyzedEvents} 个新事件` : "首次全量分析";
     $("#status").textContent = `已生成 ${manifest.commits.length} 个事件（${cacheText}）。Token 未写入项目文件。`;
-    showSummary(); render();
+    showSummary(); showHeading(); render();
+    configOpen = false; showConfig();
   } catch (error) {
     $("#status").textContent = `生成失败：${error.message}`;
+    if (focused) handleFocusView();
+    configOpen = true; showConfig();
   } finally { button.disabled = false; }
 }
 function handleSeek() {
@@ -134,7 +163,7 @@ function handlePlay() {
   $("#play").textContent = playing ? "暂停" : "播放";
 }
 async function handleExport() {
-  const button = $("#export"); button.disabled = true; $("#status").textContent = "准备导出…";
+  const button = $("#export"); button.disabled = true; $("#export-status").textContent = "准备导出…";
   try {
     const response = await fetch("/api/export", { method: "POST", headers: { "content-type": "application/json", accept: "application/x-ndjson" }, body: JSON.stringify({ manifest }) });
     let file;
@@ -146,8 +175,8 @@ async function handleExport() {
       const consume = line => {
         if (!line.trim()) return;
         const event = JSON.parse(line);
-        if (event.type === 'start') $("#status").textContent = '准备导出…';
-        else if (event.type === 'progress') $("#status").textContent = event.frame === event.total ? `画面已生成 ${event.frame}/${event.total} 帧（100%），正在完成编码…` : `正在导出 ${event.frame}/${event.total} 帧（${Math.floor(event.frame / event.total * 100)}%）`;
+        if (event.type === 'start') $("#export-status").textContent = '准备导出…';
+        else if (event.type === 'progress') $("#export-status").textContent = event.frame === event.total ? `画面已生成 ${event.frame}/${event.total} 帧（100%），正在完成编码…` : `正在导出 ${event.frame}/${event.total} 帧（${Math.floor(event.frame / event.total * 100)}%）`;
         else if (event.type === 'complete') file = event.file;
         else if (event.type === 'error') throw new Error(event.error);
       };
@@ -162,8 +191,8 @@ async function handleExport() {
       } finally { reader.releaseLock(); }
     }
     if (!file) throw new Error('导出连接中断，未收到完成结果，请重试');
-    $("#status").innerHTML = `导出完成：<a href="${file}" download>下载 MP4</a>`;
-  } catch (error) { $("#status").textContent = `导出失败：${error.message}`; }
+    $("#export-status").innerHTML = `导出完成：<a href="${file}" download>下载 MP4</a>`;
+  } catch (error) { $("#export-status").textContent = `导出失败：${error.message}`; }
   finally { button.disabled = false; }
 }
 if (manifest.version === 2) {
@@ -175,8 +204,13 @@ if (manifest.version === 2) {
   $("#max-authors").value = manifest.settings.maxAuthors;
   $("#scrub").max = manifest.duration;
   $("#export").disabled = false;
-  $("#status").textContent = "已载入上次生成的历史，可以播放或重新分析。";
+  $("#status").textContent = manifest.commits.length ? "已载入历史，可以播放或重新分析。" : "请选择本地仓库或输入远程 URL，生成可视化。";
 }
+$('#toggle-config').addEventListener('click', handleConfigToggle);
+$('#focus-view').addEventListener('click', handleFocusView);
+$('#fullscreen').addEventListener('click', handleFullscreen);
+document.addEventListener('fullscreenchange', showFullscreen);
+document.addEventListener('keydown', handleFullscreenKey);
 $("#source").addEventListener("input", handleLocalInput);
 $("#pick-local").addEventListener("click", handlePickLocal);
 $("#form").addEventListener("submit", handleGenerate);
@@ -184,4 +218,4 @@ $("#scrub").addEventListener("input", handleSeek);
 $("#play").addEventListener("click", handlePlay);
 $("#export").addEventListener("click", handleExport);
 canvas.addEventListener("click", handleCanvasClick);
-render(); showSummary(); showAccounts(); requestAnimationFrame(tick);
+showHeading(); showConfig(); render(); showSummary(); showAccounts(); requestAnimationFrame(tick);

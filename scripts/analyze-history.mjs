@@ -94,7 +94,7 @@ function normalizedTimeline(commits, duration) {
   });
 }
 
-export function analyzeHistory({ repo, branch = "main", excludes = DEFAULT_EXCLUDES, duration = 60, projectName = "Git history", previousManifest = null, timeZone = "Asia/Shanghai", maxAuthors = 16, accountLinks }) {
+export async function analyzeHistory({ repo, branch = "main", excludes = DEFAULT_EXCLUDES, duration = 60, projectName = "Git history", previousManifest = null, timeZone = "Asia/Shanghai", maxAuthors = 16, accountLinks }) {
   if (!existsSync(resolve(repo, ".git"))) throw new Error(`不是 Git 仓库: ${repo}`);
   new Intl.DateTimeFormat("zh-CN", { timeZone }).format(0);
   duration = Math.min(180, Math.max(15, Number(duration) || 60));
@@ -118,13 +118,9 @@ export function analyzeHistory({ repo, branch = "main", excludes = DEFAULT_EXCLU
     ...(previous.get(commit.sha) || stats.get(commit.sha) || parseNumstat(repo, commit.sha, commit.parents[0], pathExcludes)),
     groupIds: [],
   })).sort((a, b) => Date.parse(a.authoredAt) - Date.parse(b.authoredAt) || Date.parse(a.committedAt) - Date.parse(b.committedAt) || a.sha.localeCompare(b.sha));
-  const bySha = new Map(commits.map((commit) => [commit.sha, commit]));
-  const groups = cacheHit ? structuredClone(previousManifest.groups) : allCommits.filter((commit) => commit.parents.length > 1).map((merge) => {
-    const shas = git(repo, ["rev-list", "--no-merges", ...merge.parents.slice(1), `^${merge.parents[0]}`]).split("\n").filter((sha) => bySha.has(sha));
-    for (const sha of shas) bySha.get(sha).groupIds.push(merge.sha);
-    return { id: merge.sha, kind: "merge-group", title: merge.subject, integratedAt: merge.committedAt, commitShas: shas };
-  });
-  const retentionResult = analyzeRetention(repo, head, commits, rulesKey, path => excluded(path, pathExcludes), canIncrement ? previousManifest : null);
+  const groups = [];
+  for (const commit of commits) commit.groupIds = [];
+  const retentionResult = await analyzeRetention(repo, head, commits, rulesKey, path => excluded(path, pathExcludes), canIncrement ? previousManifest : null);
   const authors = makeAuthorMap(commits).map((author) => ({ ...author, additions: 0, deletions: 0, churn: 0, retainedLines: 0, commitCount: 0 }));
   const authorMap = new Map(authors.map((author) => [author.id, author]));
   for (const commit of commits) {
@@ -150,8 +146,8 @@ export function analyzeHistory({ repo, branch = "main", excludes = DEFAULT_EXCLU
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const [repo = process.cwd(), branch = "main", output = "data/manifest.json"] = process.argv.slice(2);
-  const manifest = analyzeHistory({ repo: resolve(repo), branch, projectName: basename(resolve(repo)) });
+  const [repo = process.cwd(), branch = "main", output = ".cache/current/manifest.json"] = process.argv.slice(2);
+  const manifest = await analyzeHistory({ repo: resolve(repo), branch, projectName: basename(resolve(repo)) });
   mkdirSync(dirname(resolve(output)), { recursive: true });
   writeFileSync(resolve(output), `${JSON.stringify(manifest, null, 2)}\n`);
   writeFileSync(resolve(output.replace(/\.json$/, ".js")), `window.__GIT_MANIFEST__ = ${JSON.stringify(manifest)};\n`);

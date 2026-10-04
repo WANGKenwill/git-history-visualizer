@@ -88,9 +88,9 @@ export async function exportVideo({ manifest, output, ffmpegPath = 'ffmpeg', onP
     const result = await encoderDone;
     if (result.error || result.code !== 0) throw new Error(stderr || result.error?.message || 'FFmpeg 编码失败');
     if (finalChurn !== manifest.totalChurn) throw new Error('末帧累计量与完整统计不一致');
-    if(manifest.retention?.version===1 && finalRetainedLines!==manifest.retention.mappedLines)throw new Error("末帧最终存留量与完整统计不一致");
+    if([1,2].includes(manifest.retention?.version) && finalRetainedLines!==manifest.retention.mappedLines)throw new Error("末帧最终存留量与完整统计不一致");
     session.assertLocal();
-    return { frames, finalChurn, ...(manifest.retention?.version===1 ? {finalRetainedLines} : {}) };
+    return { frames, finalChurn, ...([1,2].includes(manifest.retention?.version) ? {finalRetainedLines} : {}) };
   } catch (error) {
     if (encoder && encoder.exitCode === null) encoder.kill('SIGKILL');
     if (encoderDone) await encoderDone;
@@ -100,7 +100,7 @@ export async function exportVideo({ manifest, output, ffmpegPath = 'ffmpeg', onP
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const [input = 'data/manifest.json', output = `exports/git-history-${Date.now()}.mp4`] = process.argv.slice(2);
+  const [input = existsSync('.cache/current/manifest.json') ? '.cache/current/manifest.json' : 'data/manifest.json', output = `exports/git-history-${Date.now()}.mp4`] = process.argv.slice(2);
   try {
     const result = await exportVideo({ manifest: JSON.parse(readFileSync(input, 'utf8')), output: resolve(output), onProgress: (frame, total) => { if (frame % FPS === 0 || frame === total) process.stdout.write(`\r导出 ${frame}/${total} 帧`); } });
     console.log(`\n已生成 ${output}，最终改动量 ${result.finalChurn}${result.finalRetainedLines===undefined ? "" : `，最终存留量 ${result.finalRetainedLines}`}`);

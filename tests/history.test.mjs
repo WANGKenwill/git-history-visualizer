@@ -20,7 +20,7 @@ function fixture() {
   return {repo,git,commit,cleanup:()=>rmSync(repo,{recursive:true,force:true})};
 }
 
-test('reachable commits, merges, squash, stock and cached earlier additions', () => {
+test('reachable commits, merges, squash, stock and cached earlier additions', async () => {
   const f=fixture();
   try {
     const first=f.commit('first','2020-01-01T00:00:00+08:00','one\n');
@@ -30,24 +30,24 @@ test('reachable commits, merges, squash, stock and cached earlier additions', ()
     f.git('merge','feature');
     const merge=f.git('rev-parse','HEAD');
     f.git('checkout','-b','unmerged'); const unreachable=f.commit('unmerged','2020-01-03T00:00:00+08:00','ignored\n','unmerged.txt'); f.git('checkout','main');
-    const before=analyzeHistory({repo:f.repo});
+    const before=(await analyzeHistory({repo:f.repo}));
     assert.deepEqual(new Set(before.commits.map(c=>c.sha)),new Set([first,feature]));
     assert(!before.commits.some(c=>[merge,unreachable].includes(c.sha)));
-    assert.equal(before.totalChurn,2);assert.equal(before.totalLines,2);assert.equal(before.groups.length,1);
-    assert.equal(before.commits.find(c=>c.sha===feature).groupIds[0],merge);
+    assert.equal(before.totalChurn,2);assert.equal(before.totalLines,2);assert.equal(before.groups.length,0);
+    assert.deepEqual(before.commits.find(c=>c.sha===feature).groupIds,[]);
     assert.equal(historyState(before,before.duration).churn,2);
-    const cached=analyzeHistory({repo:f.repo,previousManifest:before,timeZone:'UTC',maxAuthors:1,duration:15});
+    const cached=(await analyzeHistory({repo:f.repo,previousManifest:before,timeZone:'UTC',maxAuthors:1,duration:15}));
     assert(cached.analysis.cacheHit);assert.equal(cached.settings.timeZone,'UTC');assert.equal(cached.duration,15);
     const inserted=f.commit('older author date','2019-12-31T23:00:00+08:00','three\n','older.txt');
-    const after=analyzeHistory({repo:f.repo,previousManifest:before});
+    const after=(await analyzeHistory({repo:f.repo,previousManifest:before}));
     assert.equal(after.commits[0].sha,inserted);assert(after.analysis.incremental);assert.equal(after.analysis.analyzedEvents,1);
     assert.equal(after.totalChurn,3);
     for(const author of before.authors){assert.equal(after.authors.find(a=>a.id===author.id).color,author.color);assert.deepEqual(after.layout[author.id],before.layout[author.id]);}
-    const legacy=analyzeHistory({repo:f.repo,previousManifest:{version:1,project:before.project,events:[]}});assert.equal(legacy.analysis.cacheHit,false);assert.equal(legacy.commits.length,3);
+    const legacy=(await analyzeHistory({repo:f.repo,previousManifest:{version:1,project:before.project,events:[]}}));assert.equal(legacy.analysis.cacheHit,false);assert.equal(legacy.commits.length,3);
     f.git('checkout','-b','squashed');const lost=f.commit('squash source','2020-01-04T00:00:00+08:00','squash\n','squash.txt');f.git('checkout','main');f.git('merge','--squash','squashed');const squash=f.commit('squash result','2020-01-05T00:00:00+08:00',null);
     const zero=f.commit('empty','2020-01-06T00:00:00+08:00',null);
     const binary=f.commit('binary','2020-01-07T00:00:00+08:00',Buffer.from([0,1,2]),'blob.bin');
-    const m=analyzeHistory({repo:f.repo,previousManifest:after});
+    const m=(await analyzeHistory({repo:f.repo,previousManifest:after}));
     assert(!m.commits.some(c=>c.sha===lost));assert(m.commits.some(c=>c.sha===squash));
     assert.equal(m.commits.find(c=>c.sha===zero).churn,0);assert.equal(m.commits.find(c=>c.sha===binary).churn,0);
     assert.equal(m.totalChurn,4);assert.equal(m.totalLines,4);
@@ -56,7 +56,7 @@ test('reachable commits, merges, squash, stock and cached earlier additions', ()
   } finally {f.cleanup();}
 });
 
-test('source names containing excluded directory names remain counted',()=>{
+test('source names containing excluded directory names remain counted',async ()=>{
   const f=fixture();
   try {
     const kept=['app.js','distance.js','build-config.js','vendor-helper.js','src/distribution.js','src/foo.lock.js'];
@@ -66,43 +66,46 @@ test('source names containing excluded directory names remain counted',()=>{
       writeFileSync(join(f.repo,file),'one\n');
     }
     f.git('add','.');f.commit('sources and generated files','2020-01-01T00:00:00Z',null);
-    const m=analyzeHistory({repo:f.repo});
+    const m=(await analyzeHistory({repo:f.repo}));
     assert.equal(m.commits[0].additions,6);
     assert.equal(m.totalChurn,6);assert.equal(m.totalLines,6);
     f.commit('remove source line','2020-01-02T00:00:00Z','','distance.js');
-    const updated=analyzeHistory({repo:f.repo,previousManifest:m});
+    const updated=(await analyzeHistory({repo:f.repo,previousManifest:m}));
     assert.equal(updated.commits[1].deletions,1);
     assert.equal(updated.totalChurn,7);assert.equal(updated.totalLines,5);
   }finally{f.cleanup();}
 });
 
-test('cached statistics from the old substring filter are rebuilt',()=>{
+test('cached statistics from the old substring filter are rebuilt',async ()=>{
   const f=fixture();
   try {
     f.commit('source','2020-01-01T00:00:00Z','one\n','distance.js');
-    const legacy=analyzeHistory({repo:f.repo});
+    const legacy=(await analyzeHistory({repo:f.repo}));
     delete legacy.rules.exclusionMatching;
     Object.assign(legacy.commits[0],{additions:0,churn:0});
     legacy.totalLines=0;
-    const rebuilt=analyzeHistory({repo:f.repo,previousManifest:legacy});
+    const rebuilt=(await analyzeHistory({repo:f.repo,previousManifest:legacy}));
     assert.equal(rebuilt.totalChurn,1);assert.equal(rebuilt.totalLines,1);
     assert.equal(rebuilt.analysis.cacheHit,false);
-    assert.equal(analyzeHistory({repo:f.repo,previousManifest:rebuilt}).analysis.cacheHit,true);
+    assert.equal((await analyzeHistory({repo:f.repo,previousManifest:rebuilt})).analysis.cacheHit,true);
   }finally{f.cleanup();}
 });
 
-test('same HEAD cache skips history queries, updates presentation and never mutates its input',(t)=>{
+test('same HEAD cache skips history queries, updates presentation and never mutates its input',async (t)=>{
   const f=fixture();
   try {
     f.commit('初始提交','2020-01-01T00:00:00Z','one\n');
     f.git('checkout','-b','feature');f.git('config','user.name','B');f.git('config','user.email','b@test');
     f.commit('功能提交','2020-01-02T00:00:00Z','two\n','b.txt');f.git('checkout','main');f.git('merge','--no-ff','feature','-m','合并功能');
-    const original=analyzeHistory({repo:f.repo}), unchanged=structuredClone(original), calls=[];
+    const original=(await analyzeHistory({repo:f.repo})), unchanged=structuredClone(original), calls=[];
     const real=childProcess.execFileSync;
     t.mock.method(childProcess,'execFileSync',(command,args,options)=>{if(command==='git')calls.push(args);return real(command,args,options);});
     syncBuiltinESMExports();
     try {
-      const linked=analyzeHistory({repo:f.repo,previousManifest:original,duration:15,timeZone:'UTC',maxAuthors:1,accountLinks:{'b@test':'a@test'},projectName:'缓存展示'});
+      const fresh=await analyzeHistory({repo:f.repo});
+      assert.equal(fresh.groups.length,0);assert(!calls.some(args=>args.includes('rev-list')));
+      calls.length=0;
+      const linked=(await analyzeHistory({repo:f.repo,previousManifest:original,duration:15,timeZone:'UTC',maxAuthors:1,accountLinks:{'b@test':'a@test'},projectName:'缓存展示'}));
       assert(linked.analysis.cacheHit);assert(linked.analysis.retentionCacheHit);assert.equal(linked.analysis.analyzedEvents,0);
       assert.deepEqual(calls,[['-C',f.repo,'rev-parse','main^{commit}']]);
       assert.equal(linked.project.name,'缓存展示');assert.equal(linked.duration,15);assert.equal(linked.settings.timeZone,'UTC');assert.equal(linked.settings.maxAuthors,1);
@@ -113,10 +116,10 @@ test('same HEAD cache skips history queries, updates presentation and never muta
       for(const version of [undefined,0]) {
         const old=structuredClone(original);if(version===undefined)delete old.retention;else old.retention.version=version;
         const before=structuredClone(old);calls.length=0;
-        const rebuilt=analyzeHistory({repo:f.repo,previousManifest:old});
+        const rebuilt=(await analyzeHistory({repo:f.repo,previousManifest:old}));
         assert(rebuilt.analysis.cacheHit);assert(!rebuilt.analysis.retentionCacheHit);
         assert(!calls.some(args=>args.includes('log')||args.includes('rev-list')));
-        assert(calls.some(args=>args.includes('blame')));assert.deepEqual(rebuilt.retention,original.retention);assert.deepEqual(old,before);
+        assert(calls.some(args=>args.includes('ls-tree')));assert.deepEqual(rebuilt.retention,original.retention);assert.deepEqual(old,before);
       }
     } finally {t.mock.restoreAll();syncBuiltinESMExports();}
   } finally {f.cleanup();}
@@ -238,16 +241,16 @@ test('account linking, unlinking, primary changes and aggregated identities',asy
   assert.equal(other.nodes.find(n=>n.id==='__other__').hiddenCount,1);
 });
 
-test('account settings survive cached and incremental analysis',()=>{
+test('account settings survive cached and incremental analysis',async ()=>{
   const f=fixture();try {
     f.commit('A','2020-01-01T00:00:00Z','one\n');f.git('config','user.name','B');f.git('config','user.email','b@test');
     f.commit('B','2020-01-02T00:00:00Z','two\n','b.txt');
-    const m=analyzeHistory({repo:f.repo,accountLinks:{'b@test':'a@test'}});
-    const cached=analyzeHistory({repo:f.repo,previousManifest:m});assert(cached.analysis.cacheHit);assert.deepEqual(cached.settings.accountLinks,m.settings.accountLinks);
+    const m=(await analyzeHistory({repo:f.repo,accountLinks:{'b@test':'a@test'}}));
+    const cached=(await analyzeHistory({repo:f.repo,previousManifest:m}));assert(cached.analysis.cacheHit);assert.deepEqual(cached.settings.accountLinks,m.settings.accountLinks);
     assert.equal(prepareHistory(cached).authors.length,1);
     f.commit('more B','2020-01-03T00:00:00Z','three\n','c.txt');
-    const increment=analyzeHistory({repo:f.repo,previousManifest:cached});assert(increment.analysis.incremental);assert.equal(historyState(increment,60).nodes[0].churn,3);
-    const clear=analyzeHistory({repo:f.repo,previousManifest:increment,accountLinks:{}});assert.equal(prepareHistory(clear).authors.length,2);
+    const increment=(await analyzeHistory({repo:f.repo,previousManifest:cached}));assert(increment.analysis.incremental);assert.equal(historyState(increment,60).nodes[0].churn,3);
+    const clear=(await analyzeHistory({repo:f.repo,previousManifest:increment,accountLinks:{}}));assert.equal(prepareHistory(clear).authors.length,2);
   }finally{f.cleanup();}
 });
 

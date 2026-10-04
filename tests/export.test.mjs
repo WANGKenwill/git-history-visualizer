@@ -74,9 +74,12 @@ test('local MP4 has correct frames and missing/broken encoders leave no partial 
 test('MP4 validates final retained totals and removes incomplete output on mismatch',async()=>{
   const dir=mkdtempSync(join(tmpdir(),'retention-export-'));
   try {
-    const manifest={...empty,retention:{version:1,mappedLines:0,totalLines:0,unmappedLines:0}};
+    const manifest={...empty,retention:{version:2,mappedLines:0,totalLines:0,unmappedLines:0}};
     const output=join(dir,'valid.mp4');
     assert.deepEqual(await exportVideo({manifest,output}),{frames:6,finalChurn:0,finalRetainedLines:0});
+    const probe=JSON.parse(execFileSync('ffprobe',['-v','error','-show_format','-of','json',output]));
+    assert.equal(Number(probe.format.duration),0.2);
+    execFileSync('ffmpeg',['-v','error','-i',output,'-f','null','-'],{stdio:'pipe'});
     const broken=join(dir,'mismatch.mp4');
     await assert.rejects(exportVideo({manifest:{...manifest,retention:{...manifest.retention,mappedLines:1}},output:broken}),/最终存留量.*不一致/);
     assert.equal(existsSync(broken),false);
