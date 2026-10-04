@@ -50,7 +50,7 @@ test('browser language, persistent selection and state survive switching during 
   assert.equal(await page.locator('#source').getAttribute('placeholder'),'Enter an absolute path or choose a folder');
   assert.equal(await page.locator('#scrub').getAttribute('aria-label'),'Playback position');
   await page.locator('#source').fill('/original/path');
-  await page.locator('#duration').fill('42');await page.locator('#time-zone').fill('UTC');
+  await page.locator('#duration').fill('42');await page.locator('#time-zone').selectOption('UTC');
   await page.locator('#scrub').evaluate(el=>{el.value=7;el.dispatchEvent(new Event('input'));});
   const alice=historyState(sample,7).nodes.find(node=>node.id==='a');
   const bounds=await page.locator('#preview').boundingBox();

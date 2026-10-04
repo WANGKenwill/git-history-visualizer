@@ -56,6 +56,8 @@
       a { color: var(--accent); }
       .path-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
       #source, #remote-source, #branch, #time-zone, input[type="number"] { font-family: ui-monospace, monospace; min-width: 0; }
+      #time-zone { font-family: inherit; font-size: 13px; margin-top: 8px; }
+      #time-zone-help, #time-zone-results { color: var(--muted); font-size: 11px; line-height: 1.55; margin: 7px 0 0; }
       .path-row button { width: auto; margin: 0; justify-self: end; padding: 7px 10px; font-size: 12px; white-space: nowrap; }
       details { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 15px; }
       summary { color: var(--muted); font-size: 12px; cursor: pointer; }
@@ -100,7 +102,10 @@
           <label for="duration" data-i18n="duration">视频时长（秒）</label>
           <input id="duration" type="number" min="15" max="180" step="any" value="60" />
           <label for="time-zone" data-i18n="timeZone">提交时区</label>
-          <input id="time-zone" value="Asia/Shanghai" />
+          <input id="time-zone-search" type="search" autocomplete="off" aria-controls="time-zone" aria-label="搜索时区" data-i18n-aria-label="timeZoneSearch" placeholder="搜索城市、时区或 UTC 偏移" data-i18n-placeholder="timeZoneSearchPlaceholder" />
+          <select id="time-zone" aria-describedby="time-zone-help time-zone-results"></select>
+          <p id="time-zone-help" data-i18n="timeZoneHelp">显示当前 UTC 偏移；历史日期按所选时区当时的规则计算。</p>
+          <p id="time-zone-results" role="status" hidden></p>
           <label for="max-authors" data-i18n="maxAuthors">显示作者人数（其余汇总）</label>
           <input id="max-authors" type="number" min="1" max="32" value="16" />
           <button id="analyze" disabled data-i18n="analyze">生成可视化</button>

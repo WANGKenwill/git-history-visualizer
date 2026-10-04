@@ -15,11 +15,20 @@ test('license generation includes transitive notices, is deterministic and prese
     writeFileSync(join(dir,'package.json'),JSON.stringify({name,version,license:'MIT'}));
     writeFileSync(join(dir,'LICENSE'),'Permission to use this test package.\n');
     writeFileSync(join(dir,'NOTICE'),`Notice for ${name}.\n`);
+    writeFileSync(join(dir,'ThirdPartyNotices.txt'),`Bundled components for ${name}.\n`);
+    mkdirSync(join(dir,'lib','nested'),{recursive:true});
+    writeFileSync(join(dir,'lib','nested','bundle.js.LICENSE'),`Bundled license for ${name}.\n`);
+    writeFileSync(join(dir,'lib','nested','bundle.js'),'Unrelated bundle content.\n');
   }
   const script=join(root,'scripts/update-licenses.mjs'),output=join(root,'LICENSES_THIRD_PARTY.md');
   execFileSync(process.execPath,[script]);const original=readFileSync(output,'utf8');
   assert.match(original,/direct 1\.0\.0/);assert.match(original,/transitive 2\.0\.0/);
   assert.match(original,/Permission to use/);assert.match(original,/Notice for transitive/);
+  for(const name of ['direct','transitive']){
+    assert.ok(original.includes(`### ThirdPartyNotices.txt\n\nBundled components for ${name}.`));
+    assert.ok(original.includes(`### ${join('lib','nested','bundle.js.LICENSE')}\n\nBundled license for ${name}.`));
+  }
+  assert.doesNotMatch(original,/Unrelated bundle content/);
   execFileSync(process.execPath,[script]);assert.equal(readFileSync(output,'utf8'),original);
   const pkgPath=join(root,'node_modules/direct/package.json');
   writeFileSync(pkgPath,JSON.stringify({name:'direct',version:'9.0.0',license:'MIT'}));

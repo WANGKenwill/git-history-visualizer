@@ -22,18 +22,23 @@ export async function serverFixture(t, env = {}, args = ['--no-open']) {
   await new Promise(done=>reservation.listen(0,'127.0.0.1',done));
   const port=reservation.address().port;
   await new Promise(done=>reservation.close(done));
-  const child=spawn(process.execPath,[join(app,'scripts/server.mjs'),...args],{env:{...process.env,...env,GIT_HISTORY_PORT:String(port)},stdio:['ignore','pipe','pipe']});
-  let stderr='';child.stderr.on('data',chunk=>{stderr+=chunk;});
-  t.after(async()=>{
-    if(child.exitCode===null){const closed=once(child,'close');child.kill();await closed;}
-    rmSync(dir,{recursive:true,force:true});
-  });
-  await Promise.race([once(child.stdout,'data'),once(child,'exit').then(()=>{throw new Error(stderr||'Server exited');})]);
+  let child, stderr = '';
+  const stop = async () => {
+    if(child?.exitCode===null){const closed=once(child,'close');child.kill();await closed;}
+  };
+  const start = async () => {
+    child=spawn(process.execPath,[join(app,'scripts/server.mjs'),...args],{env:{...process.env,...env,GIT_HISTORY_PORT:String(port)},stdio:['ignore','pipe','pipe']});
+    child.stderr.on('data',chunk=>{stderr+=chunk;});
+    await Promise.race([once(child.stdout,'data'),once(child,'exit').then(()=>{throw new Error(stderr||'Server exited');})]);
+  };
+  t.after(async()=>{ await stop(); rmSync(dir,{recursive:true,force:true}); });
+  await start();
+  const restart = async () => { await stop(); await start(); };
   const analyze=async(body)=>{
     const response=await fetch(`http://127.0.0.1:${port}/api/analyze`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({branch:'main',...body})});
     const result=await response.json();
     assert.equal(response.status,200,result.error);
     return result.manifest;
   };
-  return {dir,repo,git,analyze,origin:`http://127.0.0.1:${port}`,get stderr(){return stderr;}};
+  return {dir,repo,git,analyze,restart,origin:`http://127.0.0.1:${port}`,get stderr(){return stderr;}};
 }

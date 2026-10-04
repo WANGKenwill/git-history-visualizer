@@ -7,11 +7,11 @@ import { chromium } from 'playwright';
 import { serverFixture } from './helpers/server.mjs';
 import { historyState } from '../src/visualizer.js';
 
-async function studioFixture(t) {
+async function studioFixture(t, contextOptions = {}) {
   const f=await serverFixture(t);
   const browser=await chromium.launch({headless:true});
   t.after(()=>browser.close());
-  const context=await browser.newContext({locale:"zh-CN"});
+  const context=await browser.newContext({locale:"zh-CN", ...contextOptions});
   const page=await context.newPage();
   await page.addInitScript(()=>{
     const realFetch=window.fetch;
@@ -41,7 +41,8 @@ async function studioFixture(t) {
     assert.equal(result.ok,true,result.error);
     return result.manifest;
   };
-  return {...f,page,select,generate,openConfig};
+  const play=async()=>{await openConfig();return page.locator('#play').evaluate(el=>{el.click();return {time:Number(document.querySelector('#scrub').value),label:el.textContent};});};
+  return {...f,page,select,generate,openConfig,play};
 }
 
 test('file URLs show startup guidance, disable controls and never load the Studio module',{timeout:20000},async(t)=>{
@@ -100,6 +101,39 @@ test('local soundtrack selection matches the current timeline, preserves totals 
   assert.equal(invalid.status, 400); assert.equal((await invalid.json()).errorCode, 'error.invalidAudio');
   const missing = await fetch(`${f.origin}/api/export`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ manifest, audioId: id }) });
   assert.equal(missing.status, 400); assert.equal((await missing.json()).errorCode, 'error.audioMissing');
+});
+
+test('preview soundtrack follows play, pause, seek, looping, restart and removal', { timeout: 20000 }, async t => {
+  const f = await studioFixture(t), page = f.page;
+  const manifest = await f.analyze({ source: f.repo }); manifest.duration = 2;
+  await page.route('**/data/manifest.js', route => route.fulfill({ contentType: 'text/javascript', body: `window.__GIT_MANIFEST__=${JSON.stringify(manifest)};` }));
+  await page.goto(f.origin);
+  const audio = join(f.dir, 'preview.wav');
+  execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=0.8', audio]);
+  await page.locator('#audio-options').evaluate(el => { el.open = true; });
+  await page.locator('#audio-file').setInputFiles(audio);
+  await page.waitForFunction(() => !document.querySelector('#clear-audio').disabled);
+  assert.equal(await page.locator('audio').count(), 1, 'selected music must be connected to the preview');
+  const state = () => page.locator('audio').evaluate(el => ({ paused: el.paused, time: el.currentTime, video: Number(document.querySelector('#scrub').value) }));
+  const seek = value => page.locator('#scrub').evaluate((el, value) => { el.value = value; el.dispatchEvent(new Event('input')); }, value);
+  await page.locator('#play').click();
+  await page.waitForFunction(() => document.querySelector('audio').currentTime > 0.1);
+  assert.equal((await state()).paused, false);
+  await page.locator('#play').click();
+  let paused = await state(); assert.equal(paused.paused, true); assert(Math.abs(paused.time - paused.video % 0.8) < 0.15);
+  await seek(1.2);
+  await page.waitForFunction(() => Math.abs(document.querySelector('audio').currentTime - 0.4) < 0.05);
+  assert.equal((await state()).paused, true);
+  await page.locator('#play').click();
+  await page.waitForFunction(() => Number(document.querySelector('#scrub').value) > 1.7);
+  const looped = await state(); assert.equal(looped.paused, false); assert(Math.abs(looped.time - looped.video % 0.8) < 0.15);
+  await page.waitForFunction(() => Number(document.querySelector('#scrub').value) === 2 && document.querySelector('#play').textContent === '播放');
+  assert.equal((await state()).paused, true);
+  await page.locator('#play').click();
+  await page.waitForFunction(() => document.querySelector('audio').currentTime > 0.05 && !document.querySelector('audio').paused);
+  assert((await state()).video < 0.8);
+  await page.locator('#clear-audio').click();
+  await page.waitForFunction(() => document.querySelector('audio').paused && !document.querySelector('audio').hasAttribute('src'));
 });
 
 test('typed local paths preserve Unicode and spaces, clear remote URLs and omit tokens',{timeout:20000},async(t)=>{
@@ -236,11 +270,27 @@ test('author details follow commit arrivals and legacy merge groups are not disp
   await seek(1);assert.match(await f.page.locator('#author-stats').textContent(),/点击开发者球/);
 });
 
+test('play waits for Studio initialization when the module loads slowly', { timeout: 10000 }, async t => {
+  const f = await studioFixture(t), page = f.page;
+  let releaseStudio;
+  const loading = new Promise(resolve => { releaseStudio = resolve; });
+  await page.route('**/src/studio.js', async route => { await loading; await route.continue(); });
+  try {
+    await page.goto(f.origin, { waitUntil: 'domcontentloaded' });
+    const firstPlay = f.play();
+    // Flush browser interactions while the real Studio module is still blocked.
+    assert.equal(await page.locator('#play').evaluate(el => el.textContent), '播放');
+    releaseStudio();
+    assert.deepEqual(await firstPlay, { time: 0, label: '暂停' });
+    await page.waitForFunction(() => Number(document.querySelector('#scrub').value) > 0);
+  } finally { releaseStudio(); }
+});
+
 test('play restarts at the end and continues from an intermediate pause',{timeout:20000},async(t)=>{
   const f=await studioFixture(t),manifest=await f.analyze({source:f.repo});manifest.duration=.5;
   await f.page.route('**/data/manifest.js',route=>route.fulfill({contentType:'text/javascript',body:`window.__GIT_MANIFEST__=${JSON.stringify(manifest)};`}));
   await f.page.goto(f.origin);
-  const play=()=>f.page.locator('#play').evaluate(el=>{el.click();return {time:Number(document.querySelector('#scrub').value),label:el.textContent};});
+  const play=f.play;
   await play();
   await f.page.waitForFunction(()=>Number(document.querySelector('#scrub').value)===.5&&document.querySelector('#play').textContent==='播放');
   assert.deepEqual(await play(),{time:0,label:'暂停'});
@@ -287,7 +337,8 @@ test('Studio restores export controls after streamed errors, premature EOF and n
   for(const kind of ['error','eof','network']) {
     await f.page.evaluate(()=>{
       window.exportController=null;
-      window.fetch=()=>Promise.resolve(new Response(new ReadableStream({start(controller){window.exportController=controller;}}),{headers:{'content-type':'application/x-ndjson'}}));
+      const realFetch=window.fetch;
+      window.fetch=(url,...args)=>url==='/api/export'?Promise.resolve(new Response(new ReadableStream({start(controller){window.exportController=controller;}}),{headers:{'content-type':'application/x-ndjson'}})):realFetch(url,...args);
     });
     await f.page.locator('#export').click();await f.page.waitForFunction(()=>window.exportController);
     await f.page.evaluate(kind=>{
@@ -299,7 +350,7 @@ test('Studio restores export controls after streamed errors, premature EOF and n
     },kind);
     await f.page.waitForFunction(()=>!document.querySelector('#export').disabled);
     const status=await f.page.locator('#export-status').textContent();assert.match(status,/导出失败/);
-    assert.match(status,kind==='error'?/视频编码失败/:kind==='eof'?/未收到完成结果/:/查看终端日志/);
+    assert.match(status,kind==='error'?/视频编码失败/:/导出已中断/);
     assert.equal(await f.page.locator('#export-status a').count(),0);
   }
 });
@@ -484,4 +535,203 @@ test('analysis progress decodes split messages and failed streams retain the cur
     assert.match(await f.page.locator('#status').textContent(),error?/下载历史超时/:/未收到完成结果/);
     assert.equal(await f.page.locator('#project-title').textContent(),manifest.project.name);
   }
+});
+
+test('refresh verifies and restores music, removal stays cleared and expired music disappears', { timeout: 20000 }, async t => {
+  const f = await studioFixture(t), page = f.page;
+  await f.analyze({ source: f.repo }); await page.goto(f.origin);
+  const audio = join(f.dir, '恢复音乐.wav');
+  execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=18', audio]);
+  await page.locator('#audio-options').evaluate(el => { el.open = true; });
+  await page.locator('#audio-file').setInputFiles(audio);
+  await page.waitForFunction(() => !document.querySelector('#clear-audio').disabled);
+  await page.reload();
+  await page.waitForFunction(() => document.querySelector('#audio-status').textContent.includes('恢复音乐.wav'));
+  await page.locator('audio').evaluate(el => el.readyState >= 1 || new Promise(resolve => el.addEventListener('loadedmetadata', resolve, { once: true })));
+  assert.equal(await page.locator('audio').evaluate(el => el.paused), true);
+  await page.locator('#play').click();
+  await page.waitForFunction(() => document.querySelector('audio').currentTime > 0.1);
+  await page.locator('#play').click();
+  await page.locator('#audio-options').evaluate(el => { el.open = true; });
+  await page.locator('#clear-audio').click();
+  await page.waitForFunction(() => !document.querySelector('audio').hasAttribute('src'));
+  await page.reload();
+  assert.doesNotMatch(await page.locator('#audio-status').textContent(), /恢复音乐/);
+  await page.locator('#audio-options').evaluate(el => { el.open = true; });
+  await page.locator('#audio-file').setInputFiles(audio);
+  await page.waitForFunction(() => !document.querySelector('#clear-audio').disabled);
+  await f.restart(); await page.reload();
+  await page.waitForFunction(() => document.querySelector('#audio-status').textContent.includes('音频已失效'));
+  assert.doesNotMatch(await page.locator('#audio-status').textContent(), /恢复音乐/);
+  assert(await page.locator('#clear-audio').isDisabled()); assert(await page.locator('#match-audio-duration').isDisabled());
+  assert.equal(await page.locator('audio').getAttribute('src'), null);
+  assert.equal(await page.evaluate(() => sessionStorage.getItem('git-history-audio')), null);
+});
+
+test('music restored after playback starts joins the playing preview', { timeout: 20000 }, async t => {
+  const f = await studioFixture(t), page = f.page;
+  await f.analyze({ source: f.repo }); await page.goto(f.origin);
+  const audio = join(f.dir, 'restore-playing.wav');
+  execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=18', audio]);
+  await page.locator('#audio-options').evaluate(el => { el.open = true; });
+  await page.locator('#audio-file').setInputFiles(audio);
+  await page.waitForFunction(() => !document.querySelector('#clear-audio').disabled);
+  const { id } = await page.evaluate(() => JSON.parse(sessionStorage.getItem('git-history-audio')));
+  let restoreRoute, resolveRestoring;
+  const restoring = new Promise(resolve => { resolveRestoring = resolve; });
+  await page.route(`**/api/audio/${id}`, route => { restoreRoute = route; resolveRestoring(); });
+  await page.reload(); await restoring;
+  await page.locator('#play').click();
+  await page.waitForFunction(() => Number(document.querySelector('#scrub').value) > 0.1);
+  await restoreRoute.continue();
+  await page.waitForFunction(() => document.querySelector('audio').readyState >= 1 && !document.querySelector('#clear-audio').disabled);
+  await page.waitForFunction(() => !document.querySelector('audio').paused, null, { timeout: 3000 });
+  const state = await page.locator('audio').evaluate(el => ({ audioTime: el.currentTime, videoTime: Number(document.querySelector('#scrub').value) }));
+  assert(Math.abs(state.audioTime - state.videoTime) < 0.25, 'restored music should follow the current preview position');
+});
+
+test('running exports survive reload and page closure, restore downloads and release leave protection', { timeout: 30000 }, async t => {
+  const f = await studioFixture(t), page = f.page;
+  const manifest = await f.analyze({ source: f.repo }); manifest.duration = 3; manifest.commits[0].at = 0;
+  await page.route('**/data/manifest.js', route => route.fulfill({ contentType: 'text/javascript', body: `window.__GIT_MANIFEST__=${JSON.stringify(manifest)};` }));
+  await page.goto(f.origin);
+  let dialogs = 0;
+  page.on('dialog', async dialog => { assert.equal(dialog.type(), 'beforeunload'); dialogs++; await dialog.accept(); });
+  await page.locator('#export').click();
+  await page.waitForFunction(() => document.querySelector('#export-status').textContent.includes('准备导出'));
+  const active = await page.evaluate(() => !window.dispatchEvent(new Event('beforeunload', { cancelable: true })));
+  assert.equal(active, true);
+  await page.reload();
+  assert(dialogs >= 1);
+  await page.close();
+  const reopened = await page.context().newPage();
+  await reopened.goto(f.origin);
+  await reopened.locator('#export-status a').waitFor({ timeout: 20000 });
+  assert.match(await reopened.locator('#export-status').textContent(), /上次导出/);
+  assert.equal(await reopened.evaluate(() => window.dispatchEvent(new Event('beforeunload', { cancelable: true }))), true);
+  const file = await reopened.locator('#export-status a').getAttribute('href');
+  assert.equal((await fetch(`${f.origin}${file}`)).status, 200);
+  await reopened.reload();
+  await reopened.locator('#export-status a').waitFor();
+  assert.equal(await reopened.locator('#export-status a').getAttribute('href'), file);
+});
+
+test('status and music recovery keep controls locked during network loss and recover after reconnect', { timeout: 20000 }, async t => {
+  const f = await studioFixture(t), page = f.page;
+  await f.analyze({ source: f.repo });
+  await page.addInitScript(() => sessionStorage.setItem('git-history-audio', JSON.stringify({ id: 'expired', name: '旧音乐.wav' })));
+  let offline = true;
+  await page.route('**/api/export/status', route => offline ? route.abort() : route.fulfill({ json: { ok: true, task: { id: 'restored', stage: 'complete', file: '/exports/restored.mp4' } } }));
+  await page.route('**/api/audio/expired', route => offline ? route.abort() : route.fulfill({ status: 404, json: { ok: false, errorCode: 'error.audioMissing' } }));
+  await page.goto(f.origin);
+  await page.waitForFunction(() => document.querySelector('#export-status').textContent.includes('恢复任务状态') && document.querySelector('#audio-status').textContent.includes('正在恢复配乐'));
+  assert(await page.locator('#export').isDisabled()); assert(await page.locator('#clear-audio').isDisabled());
+  assert.doesNotMatch(await page.locator('#audio-status').textContent(), /旧音乐/);
+  offline = false;
+  await page.locator('#export-status a').waitFor();
+  await page.waitForFunction(() => document.querySelector('#audio-status').textContent.includes('音频已失效') && !document.querySelector('#export').disabled);
+  assert.equal(await page.locator('audio').getAttribute('src'), null);
+});
+
+test('a lost export stream recovers the running task without unlocking or dropping leave protection', { timeout: 20000 }, async t => {
+  const f = await studioFixture(t), page = f.page;
+  await f.analyze({ source: f.repo });
+  let task = null, offline = false;
+  await page.route('**/api/export/status', route => offline ? route.abort() : route.fulfill({ json: { ok: true, task } }));
+  await page.goto(f.origin);
+  await page.evaluate(() => {
+    const realFetch = window.fetch;
+    window.fetch = (url, ...args) => url === '/api/export' ? Promise.resolve(new Response(new ReadableStream({ start(controller) { window.exportController = controller; } }), { headers: { 'content-type': 'application/x-ndjson' } })) : realFetch(url, ...args);
+  });
+  await page.locator('#export').click();
+  task = { id: 'recover-running', stage: 'rendering', frame: 10, total: 90 };
+  offline = true;
+  await page.evaluate(() => {
+    window.exportController.enqueue(new TextEncoder().encode('{"type":"start","taskId":"recover-running"}\n'));
+    window.exportController.error(new Error('connection lost'));
+  });
+  await page.waitForFunction(() => document.querySelector('#export-status').textContent.includes('恢复任务状态'));
+  assert(await page.locator('#export').isDisabled());
+  assert.equal(await page.evaluate(() => window.dispatchEvent(new Event('beforeunload', { cancelable: true }))), false);
+  offline = false;
+  await page.waitForFunction(() => document.querySelector('#export-status').textContent.includes('10/90'));
+  assert(await page.locator('#export').isDisabled());
+  task = { ...task, stage: 'complete', file: '/exports/recovered.mp4' };
+  await page.locator('#export-status a').waitFor();
+  assert.equal(await page.locator('#export-status a').getAttribute('href'), task.file);
+  assert.equal(await page.evaluate(() => window.dispatchEvent(new Event('beforeunload', { cancelable: true }))), true);
+  assert(!(await page.locator('#export').isDisabled()));
+});
+
+test('audioMissing export errors immediately clear the selected music and persisted reference', { timeout: 20000 }, async t => {
+  const f = await studioFixture(t), page = f.page;
+  await f.analyze({ source: f.repo }); await page.goto(f.origin);
+  const audio = join(f.dir, '即将失效.wav');
+  execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=18', audio]);
+  await page.locator('#audio-options').evaluate(el => { el.open = true; });
+  await page.locator('#audio-file').setInputFiles(audio);
+  await page.waitForFunction(() => !document.querySelector('#clear-audio').disabled);
+  const id = await page.evaluate(() => JSON.parse(sessionStorage.getItem('git-history-audio')).id);
+  await fetch(`${f.origin}/api/audio/${id}`, { method: 'DELETE' });
+  await page.locator('#export').click();
+  await page.waitForFunction(() => document.querySelector('#export-status').textContent.includes('音频已失效'));
+  assert.doesNotMatch(await page.locator('#audio-status').textContent(), /即将失效/);
+  assert(await page.locator('#clear-audio').isDisabled()); assert(await page.locator('#match-audio-duration').isDisabled());
+  assert.equal(await page.locator('audio').getAttribute('src'), null);
+  assert.equal(await page.evaluate(() => sessionStorage.getItem('git-history-audio')), null);
+});
+
+test('time zone search preserves selection, pins common zones and submits the chosen IANA zone', { timeout: 20000 }, async t => {
+  const f = await studioFixture(t, { timezoneId: 'America/Los_Angeles' }), page = f.page;
+  await page.route('**/data/manifest.js', route => route.fulfill({ contentType: 'text/javascript', body: 'window.__GIT_MANIFEST__ = {};' }));
+  await page.goto(f.origin);
+  await page.locator('#time-zone option').first().waitFor({ state: 'attached' });
+  assert.equal(await page.locator('#time-zone').inputValue(), 'America/Los_Angeles');
+  assert.deepEqual(await page.locator('#time-zone optgroup').first().locator('option').evaluateAll(options => options.map(option => option.value)), ['Asia/Shanghai', 'UTC', 'Asia/Tokyo', 'Europe/London', 'America/New_York']);
+  await page.locator('#time-zone-search').fill('北京');
+  assert.equal(await page.locator('#time-zone').inputValue(), 'America/Los_Angeles');
+  assert.match(await page.locator('#time-zone option[value="Asia/Shanghai"]').textContent(), /北京时间.*UTC\+08:00/);
+  await page.locator('#time-zone').selectOption('Asia/Shanghai');
+  assert.equal(await page.locator('#time-zone-search').inputValue(), '');
+  await page.locator('#time-zone-search').fill('new york');
+  assert.equal(await page.locator('#time-zone option[value="America/New_York"]').count(), 1);
+  await page.locator('#time-zone-search').fill('tOkYo');
+  assert.equal(await page.locator('#time-zone').inputValue(), 'Asia/Shanghai');
+  await page.locator('#time-zone').selectOption('Asia/Tokyo');
+  await page.locator('#time-zone-search').fill('America/Indiana/Knox');
+  assert.equal(await page.locator('#time-zone option[value="America/Indiana/Knox"]').count(), 1);
+  await page.locator('#time-zone-search').fill('not-a-time-zone');
+  assert.equal(await page.locator('#time-zone').inputValue(), 'Asia/Tokyo');
+  assert.equal(await page.locator('#time-zone option').count(), 1);
+  assert.match(await page.locator('#time-zone-results').textContent(), /未找到/);
+  await page.locator('#language').selectOption('en');
+  assert.equal(await page.locator('#time-zone').inputValue(), 'Asia/Tokyo');
+  assert.match(await page.locator('#time-zone-results').textContent(), /No matching/);
+  await page.locator('#time-zone-search').fill('');
+  assert.match(await page.locator('#time-zone option:checked').textContent(), /Tokyo.*UTC\+09:00/);
+  assert(await page.locator('#time-zone option').count() > 300);
+  await f.select(f.repo);
+  assert.equal((await f.generate()).settings.timeZone, 'Asia/Tokyo');
+});
+
+test('saved time zone aliases remain selectable across language changes and current offsets include minutes', { timeout: 20000 }, async t => {
+  const f = await studioFixture(t, { timezoneId: 'Asia/Tokyo' }), page = f.page;
+  const manifest = await f.analyze({ source: f.repo, timeZone: 'US/Eastern' });
+  await page.route('**/data/manifest.js', route => route.fulfill({ contentType: 'text/javascript', body: `window.__GIT_MANIFEST__=${JSON.stringify(manifest)};` }));
+  await page.goto(f.origin);
+  await page.locator('#time-zone option').first().waitFor({ state: 'attached' });
+  assert.equal(await page.locator('#time-zone').inputValue(), 'US/Eastern');
+  assert.equal(await page.locator('#time-zone option[value="US/Eastern"]').count(), 1);
+  await page.locator('#language').selectOption('en');
+  assert.equal(await page.locator('#time-zone').inputValue(), 'US/Eastern');
+  await page.locator('#time-zone-search').fill('UTC+05:45');
+  const options = await page.locator('#time-zone option').evaluateAll(options => options.map(option => option.value));
+  assert(options.some(id => id === 'Asia/Katmandu' || id === 'Asia/Kathmandu'));
+  assert.equal(await page.locator('#time-zone').inputValue(), 'US/Eastern');
+  await page.locator('#time-zone-search').fill('');
+  await page.locator('#language').selectOption('zh-CN');
+  await page.screenshot({ path: '/tmp/git-history-timezone-selector.png', fullPage: true });
+  await page.reload();
+  await page.locator('#time-zone option').first().waitFor({ state: 'attached' });
+  assert.equal(await page.locator('#time-zone').inputValue(), 'US/Eastern');
 });

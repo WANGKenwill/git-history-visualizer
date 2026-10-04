@@ -60,9 +60,11 @@ Identical names with different email addresses remain separate by default. You c
 
 Regular repositories, Git worktrees, and bare repositories are supported. For shallow clones, click **补全历史（联网）** (“Fetch full history — requires internet”) or run `git fetch --unshallow` manually. Analysis never fetches missing history automatically. Remote analysis downloads and caches the full history of the selected branch, which may require substantial disk space.
 
-Videos are saved to `exports/` as 1920×1080, 30 fps, H.264 MP4 files. Preview and export share the same drawing function, and the final frame shows complete cumulative totals. Only one export runs at a time.
+Videos are saved to `exports/` as 1920×1080, 30 fps, H.264 MP4 files. Preview and export share the same drawing function, and the final frame shows complete cumulative totals. Exports run in the local server and continue after refreshing or closing the page. Reopening restores progress and the previous download. During export, leaving requests the browser’s native confirmation. Stopping the server interrupts the task; restarting reports the interruption and requires a new export. Missing output files are reported instead of offering a broken download. Only one export can run at a time.
 
-Expand **Add soundtrack** to choose local audio (maximum 100 MB; MP3, WAV, M4A and other formats readable by local FFmpeg). The filename and duration are shown. Shorter audio loops; longer audio is trimmed; the MP4 includes an AAC track. Without audio, exports remain silent. **Match video duration to audio** (15–180 seconds) immediately adjusts the current preview and export timeline without reanalyzing the repository. Audio is for export only; preview remains silent. Files are temporarily stored locally and cleaned up when removed, replaced, or the server exits. Select audio again after refreshing the page.
+Expand **Add soundtrack** to choose local audio (maximum 100 MB; MP3, WAV, M4A and other formats readable by local FFmpeg). The filename and duration are shown. Shorter audio loops; longer audio is trimmed; the MP4 includes an AAC track. Without audio, exports remain silent. **Match video duration to audio** (15–180 seconds) immediately adjusts the current preview and export timeline without reanalyzing the repository. Music plays in sync with preview playback, pausing, seeking and restarting. Preview requires a browser-supported audio format. Files are temporarily stored locally and cleaned up when removed, replaced, or the server exits. Refreshing the same tab verifies and restores music. Select it again after restarting the server.
+
+Search the commit time zone by city or IANA identifier; common zones appear first. Existing data restores its saved zone, while first use defaults to your system zone. Labels show current UTC offsets; historical commits use the rules for their dates. Searching preserves your selection until you choose a dropdown option.
 
 ## What the statistics mean
 
@@ -76,6 +78,8 @@ Expand **Add soundtrack** to choose local audio (maximum 100 MB; MP3, WAV, M4A a
 ## Data and privacy
 
 The server listens only on `127.0.0.1` and serves the required pages, scripts, and exported videos. Tokens are passed through the Git subprocess environment, not written to files or credential helpers. Use the token field rather than embedding credentials in URLs.
+
+Automatic favicon requests return 204, and Chrome DevTools discovery requests return an empty 404 without error logging. Other expected static-file rejections and missing files log only the request method, pathname, status, and error code, without query parameters or stack traces. Unexpected errors retain diagnostic stack traces. Private files and symbolic links remain blocked.
 
 Analysis results and repository caches are stored in `.cache/`, without modifying the bundled demo. Startup loads the most recent analysis when available. Results include author names, emails, commit subjects, and repository paths. Review them before sharing, and do not commit private data or credentials.
 
