@@ -9,22 +9,6 @@ function tick(now) { if (playing) { if (!lastFrame) lastFrame = now; time += (no
 let selectedAuthor = null;
 let loadedSource = manifest.project.source || manifest.project.repo;
 let draftLinks = accountLinks(manifest.authors, manifest.settings?.accountLinks);
-let configOpen = !(manifest.version === 2 && manifest.commits.length);
-let focused = false;
-function showConfig() {
-  $('#config-panel').hidden = focused || !configOpen;
-  $('.shell').classList.toggle('config-open', !focused && configOpen);
-  $('#toggle-config').setAttribute('aria-expanded', String(!focused && configOpen));
-  $('#toggle-config').disabled = focused;
-}
-function handleConfigToggle() { configOpen = !configOpen; showConfig(); }
-function handleFocusView() {
-  focused = !focused;
-  document.body.classList.toggle('focus-mode', focused);
-  $('#focus-view').textContent = focused ? '退出专注' : '专注观看';
-  $('#focus-view').setAttribute('aria-pressed', String(focused));
-  showConfig();
-}
 async function handleFullscreen() {
   $('#player-status').textContent = '';
   try {
@@ -91,11 +75,81 @@ function showSummary() {
   $('#summary').innerHTML = values.map(([value, label]) => `<div class="stat"><span>${label}</span><strong>${value}</strong></div>`).join('');
   $('#extra-stats').textContent = `${[1,2].includes(manifest.retention?.version) ? (manifest.retention.unmappedLines || 0).toLocaleString('zh-CN')+' 行未纳入贡献事件' : '最终存留未分析'}`;
 }
-function handleLocalInput() {
-  if ($("#source").value.trim()) {
-    $("#remote-source").value = "";
-    $("#status").textContent = "将使用输入的本地路径，点击“生成可视化”读取仓库。";
+let branchRequest = 0, branchesReady = false, readingBranches = false, generating = false, shallow = false, completingHistory = false;
+function updateBranchControls() {
+  for (const selector of ['#source', '#remote-source', '#token']) $(selector).disabled = completingHistory;
+  $("#unshallow").disabled = completingHistory || readingBranches || !shallow;
+  $("#retry-branches").disabled = completingHistory || readingBranches;
+  $("#copy-unshallow").disabled = completingHistory;
+  $("#unshallow").textContent = completingHistory ? "正在补全历史…" : "补全历史（联网）";
+  $("#analyze").disabled = generating || completingHistory || !branchesReady || shallow;
+  $("#branch").disabled = generating || completingHistory || !branchesReady;
+  $("#read-branches").disabled = generating || completingHistory || readingBranches || (!$("#remote-source").value.trim() && !shallow);
+}
+function clearBranches() {
+  branchRequest++;
+  branchesReady = false; readingBranches = false; shallow = false;
+  $("#shallow-warning").hidden = true;
+  $("#branch").replaceChildren(new Option("请先读取分支", ""));
+  updateBranchControls();
+}
+async function handleReadBranches() {
+  const remote = $("#remote-source").value.trim();
+  const source = remote || $("#source").value.trim();
+  clearBranches();
+  if (!source) return;
+  const request = branchRequest;
+  readingBranches = true; updateBranchControls();
+  $("#status").textContent = "正在读取可用分支…";
+  try {
+    const response = await fetch("/api/branches", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ source, token: remote ? $("#token").value : "" }),
+    });
+    const result = await response.json();
+    if (request !== branchRequest) return;
+    if (!result.ok) throw new Error(result.error);
+    if (!result.branches.length) throw new Error("仓库没有可用分支");
+    $("#branch").replaceChildren(...result.branches.map(branch => new Option(branch, branch)));
+    const preferred = remote ? manifest.project.branch.replace(/^origin\//, "") : manifest.project.branch;
+    $("#branch").value = (source === loadedSource || (!remote && source === manifest.project.repo)) && result.branches.includes(preferred) ? preferred : result.defaultBranch;
+    shallow = result.shallow === true;
+    $("#shallow-warning").hidden = !shallow;
+    branchesReady = true;
+    if ($("#status").textContent === "正在读取可用分支…") $("#status").textContent = "已读取分支，选择目标分支后生成可视化。";
+  } catch (error) {
+    if (request === branchRequest && $("#status").textContent === "正在读取可用分支…") $("#status").textContent = `读取分支失败：${error.message}`;
+  } finally {
+    if (request === branchRequest) { readingBranches = false; updateBranchControls(); }
   }
+}
+async function handleCompleteHistory() {
+  const source = $("#source").value.trim(), selectedBranch = $("#branch").value;
+  if (!shallow || completingHistory || !source || $("#remote-source").value.trim()) return;
+  completingHistory = true; $("#pick-local").disabled = true; updateBranchControls();
+  $("#status").textContent = "正在下载缺失的提交历史，较大仓库可能需要一些时间…";
+  try {
+    const response = await fetch("/api/unshallow", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ source }) });
+    const result = await response.json();
+    if (!result.ok) throw new Error(result.error);
+    await handleReadBranches();
+    if (branchesReady && !shallow) {
+      if ([...$("#branch").options].some(option => option.value === selectedBranch)) $("#branch").value = selectedBranch;
+      $("#status").textContent = "历史已补全，可以生成可视化。";
+    }
+  } catch (error) { $("#status").textContent = `补全历史失败：${error.message}`; }
+  finally { completingHistory = false; $("#pick-local").disabled = false; updateBranchControls(); }
+}
+
+function handleLocalInput() {
+  if ($("#source").value.trim()) $("#remote-source").value = "";
+  clearBranches();
+  $("#status").textContent = "将使用输入的本地路径，离开输入框后自动读取分支。";
+}
+function handleRemoteInput() {
+  if ($("#remote-source").value.trim()) $("#source").value = "";
+  clearBranches();
+  $("#status").textContent = "填写远程 URL 和可选 Token 后，点击“读取分支”。";
 }
 async function handlePickLocal() {
   const button = $("#pick-local");
@@ -105,7 +159,7 @@ async function handlePickLocal() {
     if (result.ok) {
       $("#source").value = result.path;
       $("#remote-source").value = "";
-      $("#status").textContent = "已选择本地仓库，可以生成可视化。";
+      await handleReadBranches();
     } else if (!result.cancelled) {
       $("#status").textContent = result.error || "本地目录弹窗不可用。";
     }
@@ -115,13 +169,14 @@ async function handlePickLocal() {
 }
 async function handleGenerate(event) {
   event.preventDefault();
-  const button = $("#analyze"), remote = $("#remote-source").value.trim();
+  const remote = $("#remote-source").value.trim();
   const source = remote || $("#source").value.trim();
   if (!source) {
     $("#status").textContent = "请输入本地仓库路径、选择文件夹，或在远程 GitLab 区域填写 URL。";
     return;
   }
-  button.disabled = true;
+  if (!branchesReady || !$("#branch").value || generating || shallow || completingHistory) return;
+  generating = true; updateBranchControls();
   $("#status").textContent = "正在读取 Git 历史与最终存留归属…";
   try {
     const response = await fetch("/api/analyze", {
@@ -143,12 +198,9 @@ async function handleGenerate(event) {
     const cacheText = result.analysis?.cacheHit ? "命中缓存" : result.analysis?.incremental ? `增量分析 ${result.analysis.analyzedEvents} 个新事件` : "首次全量分析";
     $("#status").textContent = `已生成 ${manifest.commits.length} 个事件（${cacheText}）。Token 未写入项目文件。`;
     showSummary(); showHeading(); render();
-    configOpen = false; showConfig();
   } catch (error) {
     $("#status").textContent = `生成失败：${error.message}`;
-    if (focused) handleFocusView();
-    configOpen = true; showConfig();
-  } finally { button.disabled = false; }
+  } finally { generating = false; updateBranchControls(); }
 }
 function handleSeek() {
   playing = false;
@@ -196,9 +248,8 @@ async function handleExport() {
   finally { button.disabled = false; }
 }
 if (manifest.version === 2) {
-  $("#source").value = manifest.project.repo;
+  $("#source").value = manifest.project.source?.startsWith("http") ? "" : manifest.project.repo || "";
   if (manifest.project.source?.startsWith("http")) $("#remote-source").value = manifest.project.source;
-  $("#branch").value = manifest.project.source?.startsWith("http") ? manifest.project.branch.replace(/^origin\//, "") : manifest.project.branch;
   $("#duration").value = manifest.duration;
   $("#time-zone").value = manifest.settings.timeZone;
   $("#max-authors").value = manifest.settings.maxAuthors;
@@ -206,16 +257,27 @@ if (manifest.version === 2) {
   $("#export").disabled = false;
   $("#status").textContent = manifest.commits.length ? "已载入历史，可以播放或重新分析。" : "请选择本地仓库或输入远程 URL，生成可视化。";
 }
-$('#toggle-config').addEventListener('click', handleConfigToggle);
-$('#focus-view').addEventListener('click', handleFocusView);
 $('#fullscreen').addEventListener('click', handleFullscreen);
 document.addEventListener('fullscreenchange', showFullscreen);
 document.addEventListener('keydown', handleFullscreenKey);
 $("#source").addEventListener("input", handleLocalInput);
+$("#source").addEventListener("blur", () => { if (!$("#remote-source").value.trim() && !branchesReady && !readingBranches) handleReadBranches(); });
+$("#remote-source").addEventListener("input", handleRemoteInput);
+$("#token").addEventListener("input", () => { if ($("#remote-source").value.trim()) handleRemoteInput(); });
+$("#read-branches").addEventListener("click", handleReadBranches);
+$("#copy-unshallow").addEventListener("click", async () => {
+  try { await navigator.clipboard.writeText("git fetch --unshallow"); $("#status").textContent = "已复制补全历史命令，请在仓库中执行。"; }
+  catch { $("#status").textContent = "复制失败，请手动复制 git fetch --unshallow。"; }
+});
+$("#retry-branches").addEventListener("click", handleReadBranches);
+$("#unshallow").addEventListener("click", handleCompleteHistory);
 $("#pick-local").addEventListener("click", handlePickLocal);
 $("#form").addEventListener("submit", handleGenerate);
 $("#scrub").addEventListener("input", handleSeek);
 $("#play").addEventListener("click", handlePlay);
 $("#export").addEventListener("click", handleExport);
 canvas.addEventListener("click", handleCanvasClick);
-showHeading(); showConfig(); render(); showSummary(); showAccounts(); requestAnimationFrame(tick);
+showHeading(); render(); showSummary(); showAccounts(); requestAnimationFrame(tick);
+
+updateBranchControls();
+if ($("#source").value.trim() && !$("#remote-source").value.trim()) handleReadBranches();

@@ -107,7 +107,7 @@ test('same HEAD cache skips history queries, updates presentation and never muta
       calls.length=0;
       const linked=(await analyzeHistory({repo:f.repo,previousManifest:original,duration:15,timeZone:'UTC',maxAuthors:1,accountLinks:{'b@test':'a@test'},projectName:'缓存展示'}));
       assert(linked.analysis.cacheHit);assert(linked.analysis.retentionCacheHit);assert.equal(linked.analysis.analyzedEvents,0);
-      assert.deepEqual(calls,[['-C',f.repo,'rev-parse','main^{commit}']]);
+      assert.deepEqual(calls.map(args=>args.slice(2)),[['rev-parse','--is-bare-repository'],['rev-parse','--show-toplevel'],['rev-parse','--is-shallow-repository'],['rev-parse','main^{commit}']]);
       assert.equal(linked.project.name,'缓存展示');assert.equal(linked.duration,15);assert.equal(linked.settings.timeZone,'UTC');assert.equal(linked.settings.maxAuthors,1);
       assert.deepEqual(linked.groups,original.groups);assert.equal(linked.totalLines,original.totalLines);assert.equal(linked.totalChurn,original.totalChurn);
       assert.deepEqual(linked.commits.map(({at,...c})=>c),original.commits.map(({at,...c})=>c));

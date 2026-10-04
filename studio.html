@@ -8,8 +8,7 @@
       :root { color-scheme: dark; --bg: #080b10; --panel: #121a24; --line: #263343; --fg: #edf3f8; --muted: #8795a5; --accent: #ffb000; }
       * { box-sizing: border-box; }
       body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--fg); font-family: system-ui, -apple-system, sans-serif; }
-      .shell { display: grid; grid-template-columns: minmax(0, 1fr); min-height: calc(100vh - 72px); }
-      .shell.config-open { grid-template-columns: 320px minmax(0, 1fr); }
+      .shell { display: grid; grid-template-columns: 320px minmax(0, 1fr); min-height: calc(100vh - 72px); }
       [hidden] { display: none !important; }
       .page-header { min-height: 72px; padding: 16px 24px; display: flex; align-items: center; gap: 20px; border-bottom: 1px solid var(--line); }
       .project-heading { min-width: 0; flex: 1; }
@@ -23,7 +22,7 @@
       input, button, select { width: 100%; border: 1px solid var(--line); border-radius: 9px; padding: 11px 12px; background: #0b1119; color: var(--fg); font: inherit; }
       button { margin-top: 18px; background: var(--accent); border-color: var(--accent); color: #211705; font-weight: 700; cursor: pointer; }
       button.secondary { background: transparent; border-color: var(--line); color: var(--fg); }
-      button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+      button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
       button:disabled { opacity: .5; cursor: wait; }
       #status, #export-status, #player-status { color: var(--muted); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
       #status { min-height: 44px; margin-top: 20px; }
@@ -60,12 +59,10 @@
       details { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 15px; }
       summary { color: var(--muted); font-size: 12px; cursor: pointer; }
       details label:first-of-type { margin-top: 16px; }
-      .focus-mode .support { display: none; }
-      .focus-mode .player { width: min(100%, calc((100dvh - 200px) * 16 / 9)); align-self: center; }
       .player:fullscreen { background: var(--bg); width: 100vw; height: 100dvh; padding: 24px; justify-content: center; align-items: center; overflow: auto; --controls-height: 180px; }
       .player:fullscreen .stage { flex-shrink: 0; width: min(100%, calc((100dvh - var(--controls-height)) * 16 / 9)); }
       .player:fullscreen .toolbar, .player:fullscreen #export-status, .player:fullscreen #player-status { width: 100%; }
-      @media (max-width: 999px) { .shell.config-open { grid-template-columns: minmax(0, 1fr); } aside { border-right: 0; border-bottom: 1px solid var(--line); } }
+      @media (max-width: 999px) { .shell { grid-template-columns: minmax(0, 1fr); } aside { border-right: 0; border-bottom: 1px solid var(--line); } }
       @media (max-width: 1100px) { .toolbar input[type="range"] { flex-basis: 100%; order: 2; } }
       @media (max-width: 600px) { main { padding: 16px; } .page-header { padding: 16px; gap: 12px; } .toolbar { gap: 8px; } .toolbar button { padding: 8px 10px; } #time-label { margin-left: auto; } .account-actions { flex-wrap: wrap; } .player:fullscreen { padding: 16px; --controls-height: 240px; } }
     </style>
@@ -73,9 +70,8 @@
   <body>
     <header class="page-header">
       <div class="project-heading"><h1 id="project-title">Git History</h1><span id="project-branch"></span></div>
-      <button id="toggle-config" class="secondary" aria-controls="config-panel" aria-expanded="true">仓库配置</button>
     </header>
-    <div class="shell config-open">
+    <div class="shell">
       <aside id="config-panel">
         <h1>Git History</h1>
         <p class="lede">用开发者球群展示累计改动，用时间环展示提交时刻。首选输入本地 Git 路径：速度快，也不需要 GitLab Token。</p>
@@ -84,20 +80,28 @@
           <div class="path-row"><input id="source" placeholder="输入绝对路径，或选择文件夹" /><button id="pick-local" type="button" class="secondary">选择文件夹</button></div>
           <details>
             <summary>远程 GitLab（可选，较慢）</summary>
+            <p>首次生成会下载所选分支的完整历史到本地缓存，不展开源码文件；后续复用并更新缓存。已有普通缓存继续复用。</p>
             <label for="remote-source">GitLab 仓库 URL</label>
             <input id="remote-source" placeholder="https://gitlab.example.com/group/project" />
             <label for="token">GitLab Token</label>
             <input id="token" type="password" placeholder="仅远程私有仓库需要" />
+            <button id="read-branches" type="button" class="secondary">读取分支</button>
           </details>
-          <label for="branch">主分支</label>
-          <input id="branch" value="main" />
+          <label for="branch">目标分支</label>
+          <select id="branch" disabled><option value="">请先读取分支</option></select>
+          <div id="shallow-warning" role="status" hidden>
+            <p>此仓库为浅克隆，提交历史不完整，无法准确统计累计变更和最终留存。点击“补全历史”下载缺失历史，完成后自动重新读取分支。也可在仓库中手动执行 <code>git fetch --unshallow</code>。</p>
+            <button id="unshallow" type="button">补全历史（联网）</button>
+            <button id="copy-unshallow" type="button" class="secondary">复制补全命令</button>
+            <button id="retry-branches" type="button" class="secondary">重新读取分支</button>
+          </div>
           <label for="duration">视频时长（秒）</label>
           <input id="duration" type="number" min="15" max="180" value="60" />
           <label for="time-zone">提交时区</label>
           <input id="time-zone" value="Asia/Shanghai" />
           <label for="max-authors">显示作者人数（其余汇总）</label>
           <input id="max-authors" type="number" min="1" max="32" value="16" />
-          <button id="analyze">生成可视化</button>
+          <button id="analyze" disabled>生成可视化</button>
         </form>
         <div id="status" role="status">等待导入仓库。</div>
       </aside>
@@ -108,19 +112,18 @@
             <button id="play" class="secondary">播放</button>
             <input id="scrub" aria-label="播放进度" type="range" min="0" max="60" step="0.01" value="0" />
             <span id="time-label">0.0s / 60s</span>
-            <button id="focus-view" class="secondary" aria-pressed="false">专注观看</button>
             <button id="fullscreen" class="secondary" aria-pressed="false">全屏</button>
             <button id="export" class="secondary" disabled>导出 MP4</button>
           </div>
           <div id="export-status" role="status"></div>
           <div id="player-status" role="status"></div>
         </section>
-        <section class="overview support" aria-label="项目概览">
+        <section class="overview" aria-label="项目概览">
           <h2>项目概览</h2><div id="summary" class="summary"></div>
           <details id="statistics-details"><summary>统计详情</summary><p id="extra-stats"></p><p class="lede">改动量不等于贡献质量；合并提交与冲突解决改动不单独计入。Squash 仅展示保留的提交和作者。</p></details>
         </section>
-        <div id="author-detail" class="stat support"><span id="author-stats">点击开发者球查看累计改动与最终存留。</span></div>
-        <details id="accounts" class="support"><summary>账号关联（配置后点击“生成可视化”生效）</summary><p id="account-status"></p><div id="account-list"></div></details>
+        <div id="author-detail" class="stat"><span id="author-stats">点击开发者球查看累计改动与最终存留。</span></div>
+        <details id="accounts"><summary>账号关联（配置后点击“生成可视化”生效）</summary><p id="account-status"></p><div id="account-list"></div></details>
       </main>
     </div>
     <script src="./data/manifest.js"></script>

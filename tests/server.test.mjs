@@ -152,9 +152,23 @@ test('remote refresh reuses downloaded history and analyzes new commits',{timeou
   await new Promise(done=>remoteServer.listen(0,'127.0.0.1',done));
   t.after(()=>new Promise(done=>remoteServer.close(done)));
   const source=`http://127.0.0.1:${remoteServer.address().port}/repo.git`;
+  const branchResponse=await fetch(`${f.origin}/api/branches`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({source,token})});
+  assert.deepEqual(await branchResponse.json(),{ok:true,branches:['main'],defaultBranch:'main'});
+  assert.equal(oldDownloads,0,'listing branches must not download commit objects');
+  assert.deepEqual(readdirSync(join(f.dir,'app','.cache/repositories')),[]);
+  const denied=await fetch(`${f.origin}/api/branches`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({source,token:'wrong-token'})});
+  assert.equal(denied.status,400);
   const analyze=(body={})=>f.analyze({source,token,...body});
+  // An empty cache directory must not resolve to an enclosing Git repository.
+  execFileSync('git',['-C',join(f.dir,'app'),'init','-b','main'],{stdio:'pipe'});
+  const emptyCache=join(f.dir,'app/.cache/repositories',createHash('sha256').update(`${source}\0token`).digest('hex').slice(0,16));
+  mkdirSync(emptyCache);
   const first=await analyze();
   assert.equal(first.totalChurn,1);assert.equal(oldDownloads,1);
+  const cachedRepo=first.project.repo;
+  assert.equal(execFileSync('git',['-C',cachedRepo,'rev-parse','--is-bare-repository'],{encoding:'utf8'}).trim(),'true');
+  assert(!readdirSync(cachedRepo).includes('app.js'));
+  assert(!readFileSync(join(cachedRepo,'config'),'utf8').includes(token));
   f.git('config','user.name','B');f.git('config','user.email','b@test');
   writeFileSync(join(f.repo,'app.js'),'one\ntwo\n');f.git('add','.');f.git('commit','-m','second');
   f.git('push',remote,'main');publish();
@@ -164,6 +178,21 @@ test('remote refresh reuses downloaded history and analyzes new commits',{timeou
   assert.equal(oldDownloads,1,'already downloaded commits should not be downloaded again');
   assert.equal(refreshed.analysis.incremental,true);
   assert.equal((await analyze()).analysis.cacheHit,true);
+  f.git('checkout','-b','feature/test');
+  writeFileSync(join(f.repo,'feature.js'),'feature\n');f.git('add','.');f.git('commit','-m','功能分支');
+  f.git('push',remote,'feature/test');publish();
+  const feature=await analyze({branch:'feature/test'});
+  assert.equal(feature.totalChurn,3);assert.equal(feature.project.repo,cachedRepo);
+  f.git('checkout','main');
+  assert.equal((await analyze()).project.head,refreshed.project.head);
+  // Existing ordinary caches keep their worktree and tracking refs.
+  rmSync(cachedRepo,{recursive:true,force:true});
+  execFileSync('git',['clone',remote,cachedRepo],{stdio:'pipe'});
+  execFileSync('git',['-C',cachedRepo,'remote','set-url','origin',source],{stdio:'pipe'});
+  const ordinary=await analyze();
+  assert.equal(ordinary.project.branch,'origin/main');
+  assert.equal(ordinary.analysis.cacheHit,true);
+  assert(readdirSync(cachedRepo).includes('app.js'));
   await t.test('legacy remote cache retains its saved account associations',async()=>{
     const links={'b@test':'test@example.com'};
     const legacy=await analyze({accountLinks:links});
@@ -176,4 +205,65 @@ test('remote refresh reuses downloaded history and analyzes new commits',{timeou
     assert.equal(upgraded.analysis.cacheHit,false);
     assert.equal((await analyze()).analysis.cacheHit,true);
   });
+  const lastResult=readFileSync(join(f.dir,'app/.cache/current/manifest.json'),'utf8');
+  rmSync(cachedRepo,{recursive:true,force:true});
+  execFileSync('git',['clone','--depth','1',new URL(`file://${remote}`).href,cachedRepo],{stdio:'pipe'});
+  execFileSync('git',['-C',cachedRepo,'remote','set-url','origin',source],{stdio:'pipe'});
+  const rejected=await fetch(`${f.origin}/api/analyze`,{method:'POST',body:JSON.stringify({source,token,branch:'main'})});
+  assert.equal(rejected.status,400);assert.match((await rejected.json()).error,/浅克隆/);
+  assert.equal(readFileSync(join(f.dir,'app/.cache/current/manifest.json'),'utf8'),lastResult);
+  assert.equal(execFileSync('git',['-C',cachedRepo,'rev-parse','--is-shallow-repository'],{encoding:'utf8'}).trim(),'true');
+});
+
+test('branch API reads local branches, current checkout and detached HEAD without analyzing',{timeout:20000},async(t)=>{
+  const f=await fixture(t);
+  const post=source=>fetch(`${f.origin}/api/branches`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({source})});
+  assert.deepEqual(await (await post(f.repo)).json(),{ok:true,branches:['main'],defaultBranch:'main',shallow:false});
+  f.git('branch','alpha');f.git('branch','feature/test');f.git('branch','-m','main','master');
+  assert.deepEqual(await (await post(f.repo)).json(),{ok:true,branches:['alpha','feature/test','master'],defaultBranch:'master',shallow:false});
+  f.git('checkout','--detach');
+  assert.equal((await (await post(f.repo)).json()).defaultBranch,'alpha');
+  const worktree=join(f.dir,'worktree');f.git('worktree','add','--detach',worktree);
+  assert.equal((await (await post(worktree)).json()).defaultBranch,'alpha');
+  const empty=join(f.dir,'empty');mkdirSync(empty);execFileSync('git',['-C',empty,'init','-b','main'],{stdio:'pipe'});
+  for(const [source,message] of [[empty,/没有可用分支/],[f.dir,/不是 Git 仓库/],['',/请输入/]]) {
+    const response=await post(source);assert.equal(response.status,400);assert.match((await response.json()).error,message);
+  }
+  assert.deepEqual(readdirSync(join(f.dir,'app','.cache/current')),[]);
+});
+
+test('remote branch queries parse defaults, protect tokens and use a 30 second timeout',{timeout:20000},async(t)=>{
+  const dir=mkdtempSync(join(tmpdir(),'history-branches-'));t.after(()=>rmSync(dir,{recursive:true,force:true}));
+  const log=join(dir,'query.json'),preload=join(dir,'mock.mjs'),token="branch-token-'$`";
+  writeFileSync(preload,`
+import cp from 'node:child_process';
+import {syncBuiltinESMExports} from 'node:module';
+import {readFileSync,writeFileSync} from 'node:fs';
+const original=cp.execFile;
+cp.execFile=function(file,args,options,callback){
+  if(!args.includes('ls-remote'))return original.apply(this,arguments);
+  const source=args.find(a=>a.startsWith('https://'));
+  const helper=options.env.GIT_ASKPASS;
+  const password=cp.execFileSync(helper,['Password for remote'],{env:options.env,encoding:'utf8'});
+  writeFileSync(process.env.QUERY_LOG,JSON.stringify({timeout:options.timeout,args,nonInteractive:options.env.GIT_TERMINAL_PROMPT==='0',correctPassword:password===process.env.EXPECTED_TOKEN,secretInScript:readFileSync(helper,'utf8').includes(process.env.EXPECTED_TOKEN)}));
+  const output=source.includes('empty')?'':source.includes('fallback')?'abc123\\trefs/heads/zeta\\nabc123\\trefs/heads/alpha\\n':'ref: refs/heads/master\\tHEAD\\nabc123\\tHEAD\\nabc123\\trefs/heads/feature/test\\nabc123\\trefs/heads/master\\n';
+  queueMicrotask(()=>callback(source.includes('timeout')?Object.assign(new Error('timeout'),{killed:true}):source.includes('auth')?new Error(process.env.EXPECTED_TOKEN):null,output));
+};
+syncBuiltinESMExports();
+`);
+  const f=await fixture(t,{NODE_OPTIONS:`--import=${preload}`,QUERY_LOG:log,EXPECTED_TOKEN:token});
+  const post=async name=>{
+    const response=await fetch(`${f.origin}/api/branches`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({source:`https://example.invalid/${name}.git`,token})});
+    const result=await response.json();assert(!JSON.stringify(result).includes(token));return {response,result};
+  };
+  assert.deepEqual((await post('repo')).result,{ok:true,branches:['feature/test','master'],defaultBranch:'master'});
+  const options=JSON.parse(readFileSync(log,'utf8'));
+  assert.equal(options.timeout,30000);assert(options.nonInteractive&&options.correctPassword&&!options.secretInScript);
+  assert(options.args.includes('credential.helper=')&&options.args.includes('--symref'));
+  assert.equal((await post('fallback')).result.defaultBranch,'alpha');
+  for(const [name,message] of [['empty',/没有可用分支/],['auth',/URL、Token 和网络/],['timeout',/超时/]]) {
+    const {response,result}=await post(name);assert.equal(response.status,400);assert.match(result.error,message);
+  }
+  assert.deepEqual(readdirSync(join(f.dir,'app','.cache/repositories')),[]);
+  assert.deepEqual(readdirSync(join(f.dir,'app','.cache/current')),[]);
 });

@@ -15,7 +15,7 @@ async function studioFixture(t) {
   const page=await context.newPage();
   let picked=f.repo;
   await page.route('**/api/pick-local',route=>route.fulfill({json:{ok:true,path:picked}}));
-  const openConfig=async()=>{await page.locator('#summary strong').first().waitFor({state:'attached'});if(!await page.locator('#config-panel').isVisible())await page.locator('#toggle-config').click();};
+  const openConfig=async()=>{await page.locator('#summary strong').first().waitFor({state:'attached'});await page.locator('#config-panel').waitFor({state:'visible'});};
   const select=async(path)=>{
     await openConfig();
     picked=path;await page.locator('#pick-local').click();
@@ -23,6 +23,8 @@ async function studioFixture(t) {
   };
   const generate=async()=>{
     await openConfig();
+    await page.locator("#source").blur();
+    await page.waitForFunction(()=>!document.querySelector("#analyze").disabled);
     const response=page.waitForResponse(response=>response.url().endsWith('/api/analyze'));
     await page.locator('#analyze').click();
     const result=await (await response).json();
@@ -57,6 +59,8 @@ test('typed local paths preserve Unicode and spaces, clear remote URLs and omit 
   const remote='https://gitlab.example.com/new';
   await f.openConfig();await f.page.locator('#remote-source').fill(remote);
   await f.page.route('**/api/analyze',route=>{const body=route.request().postDataJSON();assert.equal(body.source,remote);assert.equal(body.token,'private-token');return route.fulfill({json:{ok:true,manifest:result}});});
+  await f.page.route('**/api/branches',route=>route.fulfill({json:{ok:true,branches:['main'],defaultBranch:'main'}}));
+  await f.page.locator('#read-branches').click();
   await f.generate();
 });
 
@@ -69,11 +73,14 @@ test('picker cancellation and failure retain manually entered paths',{timeout:20
     assert.equal(await f.page.locator('#source').inputValue(),f.repo);
     if(result.error)assert.match(await f.page.locator('#status').textContent(),/弹窗不可用/);
   }
-  const response=f.page.waitForResponse(response=>response.url().endsWith('/api/analyze'));
-  await f.page.locator('#source').fill(join(f.dir,'不存在的仓库'));await f.page.locator('#analyze').click();
-  assert.equal((await response).status(),400);
+  await f.page.locator('#source').blur();
   await f.page.waitForFunction(()=>!document.querySelector('#analyze').disabled);
-  assert.match(await f.page.locator('#status').textContent(),/生成失败.*不是 Git 仓库/);
+  const response=f.page.waitForResponse(response=>response.url().endsWith('/api/branches')&&response.request().postDataJSON().source.endsWith('不存在的仓库'));
+  await f.page.locator('#source').fill(join(f.dir,'不存在的仓库'));await f.page.locator('#source').blur();
+  assert.equal((await response).status(),400);
+  await f.page.waitForFunction(()=>document.querySelector('#status').textContent.includes('读取分支失败'));
+  assert(await f.page.locator('#analyze').isDisabled());
+  assert.match(await f.page.locator('#status').textContent(),/读取分支失败.*不是 Git 仓库/);
 });
 
 test('switching repositories preserves their saved account associations',{timeout:20000},async(t)=>{
@@ -121,11 +128,16 @@ test('restoring a remote history submits the actual remote branch name',{timeout
     submitted=route.request().postDataJSON();
     return route.fulfill({json:{ok:true,manifest}});
   });
-  await f.page.goto(f.origin);await f.generate();
+  await f.page.route('**/api/branches',route=>route.fulfill({json:{ok:true,branches:['main','master'],defaultBranch:'master'}}));
+  await f.page.goto(f.origin);await f.openConfig();
+  assert(await f.page.locator('#analyze').isDisabled());
+  await f.page.getByText('远程 GitLab（可选，较慢）',{exact:true}).click();
+  await f.page.locator('#read-branches').click();await f.generate();
   assert.equal(submitted.branch,'main');
+  await f.page.unroute('**/api/branches');
   manifest.project.source=f.repo;
   await f.page.goto(f.origin);await f.generate();
-  assert.equal(submitted.branch,'origin/main');
+  assert.equal(submitted.branch,'main');
 });
 
 test('each Studio page exports its own manifest after another page analyzes history',{timeout:20000},async(t)=>{
@@ -200,7 +212,6 @@ test('Studio decodes split progress messages and only offers downloads after com
   await f.openConfig();await f.page.locator('#source').fill('/tmp/another repository');
   assert.match(await f.page.locator('#status').textContent(),/输入的本地路径/);
   assert.equal(await f.page.locator('#export-status').textContent(),'准备导出…');
-  await f.page.locator('#toggle-config').click();
   await enqueue(Buffer.from('1,"total":90}\n'));
   await f.page.waitForFunction(()=>document.querySelector('#export-status').textContent.includes('1/90'));
   assert.match(await f.page.locator('#export-status').textContent(),/1%/);assert(await f.page.locator('#export').isDisabled());
@@ -237,69 +248,43 @@ test('Studio restores export controls after streamed errors, premature EOF and n
 });
 
 
-test('watching layout defaults, responsive configuration and compact statistics',{timeout:20000},async(t)=>{
-  const f=await studioFixture(t);await f.page.goto(f.origin);await f.page.locator('#summary strong').first().waitFor({state:'attached'});
-  assert(await f.page.locator('#config-panel').isVisible());
+test('configuration stays visible before and after generation and fits narrow windows',{timeout:20000},async(t)=>{
+  const f=await studioFixture(t);await f.page.goto(f.origin);await f.openConfig();
   assert.equal(await f.page.locator('#project-title').textContent(),'Git History');
+  assert.equal(await f.page.locator('#toggle-config, #focus-view').count(),0);
   await f.select(f.repo);const manifest=await f.generate();
-  assert(!await f.page.locator('#config-panel').isVisible());
+  assert(await f.page.locator('#config-panel').isVisible());
   assert.equal(await f.page.locator('#project-title').textContent(),manifest.project.name);
   assert.equal(await f.page.locator('#summary .stat').count(),4);
   assert.equal(await f.page.locator('#statistics-details').evaluate(el=>el.open),false);
   assert.match(await f.page.locator('#extra-stats').textContent(),/未纳入贡献事件/);
-  await f.page.goto(f.origin);await f.page.locator('#summary strong').first().waitFor({state:'attached'});
-  assert(!await f.page.locator('#config-panel').isVisible());
+  await f.page.goto(f.origin);await f.openConfig();
   for(const width of [1440,1000,803,390]){
     await f.page.setViewportSize({width,height:1000});
-    for(const open of [false,true]){
-      if(open)await f.openConfig();
-      const metrics=await f.page.evaluate(()=>{
-        const canvas=document.querySelector('#preview').getBoundingClientRect(),panel=document.querySelector('#config-panel').getBoundingClientRect();
-        return {width:canvas.width,height:canvas.height,panelWidth:panel.width,panelBottom:panel.bottom,canvasTop:canvas.top,scroll:document.documentElement.scrollWidth};
-      });
-      assert(metrics.scroll<=width,`overflow at ${width}`);
-      assert(Math.abs(metrics.width/metrics.height-16/9)<.02);
-      if(width===803&&!open)assert(metrics.width>=740);
-      if(open&&width>=1000)assert.equal(metrics.panelWidth,320);
-      if(open&&width<1000)assert(metrics.canvasTop>=metrics.panelBottom);
-      if(open)await f.page.locator('#toggle-config').click();
-    }
+    const metrics=await f.page.evaluate(()=>{
+      const canvas=document.querySelector('#preview').getBoundingClientRect(),panel=document.querySelector('#config-panel').getBoundingClientRect();
+      return {width:canvas.width,height:canvas.height,panelWidth:panel.width,panelBottom:panel.bottom,canvasTop:canvas.top,scroll:document.documentElement.scrollWidth};
+    });
+    assert(metrics.scroll<=width,`overflow at ${width}`);
+    assert(Math.abs(metrics.width/metrics.height-16/9)<.02);
+    if(width>=1000)assert.equal(metrics.panelWidth,320);
+    else assert(metrics.canvasTop>=metrics.panelBottom);
   }
-  await f.openConfig();await f.page.locator('#branch').fill('feature/test');
-  await f.page.locator('#toggle-config').click();await f.openConfig();
+  f.git('branch','feature/test');
+  await f.select(f.repo);await f.page.locator('#branch').selectOption('feature/test');
   assert.equal(await f.page.locator('#branch').inputValue(),'feature/test');
   await f.page.locator('#source').fill(join(f.dir,'missing'));
-  const response=f.page.waitForResponse(r=>r.url().endsWith('/api/analyze'));
-  await f.page.locator('#analyze').click();await response;
-  await f.page.waitForFunction(()=>!document.querySelector('#analyze').disabled);
+  const response=f.page.waitForResponse(r=>r.url().endsWith('/api/branches'));
+  await f.page.locator('#source').blur();await response;
+  await f.page.waitForFunction(()=>document.querySelector('#status').textContent.includes('读取分支失败'));
+  assert(await f.page.locator('#analyze').isDisabled());
   assert(await f.page.locator('#config-panel').isVisible());
-  assert.match(await f.page.locator('#status').textContent(),/生成失败/);
-});
-
-test('focus view preserves configuration, details, selection and playback',{timeout:20000},async(t)=>{
-  const f=await studioFixture(t),manifest=await f.analyze({source:f.repo,duration:30});await f.page.goto(f.origin);await f.page.locator('#summary strong').first().waitFor({state:'attached'});
-  await f.openConfig();await f.page.locator('#statistics-details > summary').click();await f.page.locator('#accounts > summary').click();
-  await f.page.locator('#scrub').evaluate(el=>{el.value=10;el.dispatchEvent(new Event('input',{bubbles:true}));});
-  const node=historyState(manifest,10).nodes[0],box=await f.page.locator('#preview').boundingBox();
-  await f.page.mouse.click(box.x+node.x*box.width/1920,box.y+node.y*box.height/1080);
-  const selected=await f.page.locator('#author-stats').textContent();assert(selected.includes(node.name));
-  await f.page.locator('#focus-view').click();
-  assert(!await f.page.locator('#config-panel').isVisible());assert(!await f.page.locator('#summary').isVisible());assert(!await f.page.locator('#author-detail').isVisible());assert(!await f.page.locator('#accounts').isVisible());
-  assert.equal(await f.page.locator('#scrub').inputValue(),'10');
-  await f.page.locator('#focus-view').click();
-  assert(await f.page.locator('#config-panel').isVisible());
-  assert.equal(await f.page.locator('#statistics-details').evaluate(el=>el.open),true);
-  assert.equal(await f.page.locator('#accounts').evaluate(el=>el.open),true);
-  assert.equal(await f.page.locator('#author-stats').textContent(),selected);
-  await f.page.locator('#toggle-config').click();await f.page.locator('#play').click();await f.page.locator('#focus-view').click();
-  await f.page.waitForFunction(()=>Number(document.querySelector('#scrub').value)>10.1);
-  assert.equal(await f.page.locator('#play').textContent(),'暂停');
-  await f.page.locator('#focus-view').click();assert(!await f.page.locator('#config-panel').isVisible());
-  await f.page.locator('#play').click();
 });
 
 test('fullscreen includes controls, preserves aspect ratio and follows exit events',{timeout:20000},async(t)=>{
   const f=await studioFixture(t);await f.analyze({source:f.repo});await f.page.goto(f.origin);await f.page.locator('#summary strong').first().waitFor({state:'attached'});
+  await f.page.locator('#statistics-details > summary').click();await f.page.locator('#accounts > summary').click();
+  const source=await f.page.locator('#source').inputValue();
   await f.page.locator('#scrub').evaluate(el=>{el.value=10;el.dispatchEvent(new Event('input',{bubbles:true}));});
   await f.page.locator('#fullscreen').click();
   await f.page.waitForFunction(()=>document.fullscreenElement?.id==='player');
@@ -312,7 +297,111 @@ test('fullscreen includes controls, preserves aspect ratio and follows exit even
   await f.page.waitForFunction(()=>!document.fullscreenElement);
   await f.page.waitForFunction(()=>document.querySelector('#fullscreen').textContent==='全屏');
   assert.equal(await f.page.locator('#fullscreen').getAttribute('aria-pressed'),'false');
+  assert(await f.page.locator('#config-panel').isVisible());assert.equal(await f.page.locator('#source').inputValue(),source);
+  assert.equal(await f.page.locator('#statistics-details').evaluate(el=>el.open),true);
+  assert.equal(await f.page.locator('#accounts').evaluate(el=>el.open),true);
   await f.page.evaluate(()=>{document.querySelector('#player').requestFullscreen=()=>Promise.reject(new Error('浏览器拒绝请求'));});
   await f.page.locator('#fullscreen').click();await f.page.locator('#player-status').getByText('无法切换全屏：浏览器拒绝请求').waitFor();
   assert.equal(await f.page.locator('#fullscreen').textContent(),'全屏');
+});
+
+test('local branch selection detects master, analyzes a chosen branch and restores it',{timeout:20000},async(t)=>{
+  const f=await studioFixture(t);f.git('branch','-m','main','master');f.git('checkout','-b','feature/test');
+  writeFileSync(join(f.repo,'feature.js'),'two\n');f.git('add','.');f.git('commit','-m','feature');f.git('checkout','master');
+  await f.page.goto(f.origin);await f.select(f.repo);
+  assert.equal(await f.page.locator('#branch').evaluate(el=>el.tagName),'SELECT');
+  assert.equal(await f.page.locator('#branch').inputValue(),'master');
+  assert.deepEqual(await f.page.locator('#branch option').allTextContents(),['feature/test','master']);
+  await f.page.locator('#branch').selectOption('feature/test');
+  const m=await f.generate();assert.equal(m.project.branch,'feature/test');assert.equal(m.totalChurn,2);
+  await f.page.goto(f.origin);await f.page.waitForFunction(()=>!document.querySelector('#branch').disabled);
+  assert.equal(await f.page.locator('#branch').inputValue(),'feature/test');
+});
+
+test('branch responses from a previous local path cannot overwrite the latest selection',{timeout:20000},async(t)=>{
+  const f=await studioFixture(t);await f.page.goto(f.origin);
+  let firstRoute,resolveFirst;const first=new Promise(done=>{resolveFirst=done;});
+  await f.page.route('**/api/branches',route=>{
+    if(route.request().postDataJSON().source.endsWith('/first')){firstRoute=route;resolveFirst();return;}
+    return route.fulfill({json:{ok:true,branches:['master'],defaultBranch:'master'}});
+  });
+  await f.page.locator('#source').fill('/tmp/first');await f.page.locator('#source').blur();await first;
+  assert(await f.page.locator('#analyze').isDisabled());
+  await f.page.locator('#source').fill('/tmp/second');
+  assert.equal(await f.page.locator('#branch').inputValue(),'');
+  await f.page.locator('#source').blur();await f.page.waitForFunction(()=>!document.querySelector('#branch').disabled);
+  const oldResponse=f.page.waitForResponse(r=>r.url().endsWith('/api/branches')&&r.request().postDataJSON().source.endsWith('/first'));
+  await firstRoute.fulfill({json:{ok:true,branches:['wrong'],defaultBranch:'wrong'}});await oldResponse;
+  // Drain the browser fetch callback before checking its effect.
+  await f.page.evaluate(()=>new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done))));
+  assert.equal(await f.page.locator('#branch').inputValue(),'master');
+  assert.deepEqual(await f.page.locator('#branch option').allTextContents(),['master']);
+  assert.match(await f.page.locator('#status').textContent(),/已读取分支/);
+});
+
+test('remote branches require an explicit read, allow retry and invalidate on URL or Token changes',{timeout:20000},async(t)=>{
+  const f=await studioFixture(t),m=await f.analyze({source:f.repo});
+  m.project.source='https://example.invalid/restored.git';m.project.branch='origin/main';
+  await f.page.route('**/data/manifest.js',route=>route.fulfill({contentType:'text/javascript',body:`window.__GIT_MANIFEST__=${JSON.stringify(m)};`}));
+  let calls=0,submitted;
+  await f.page.route('**/api/branches',route=>{
+    calls++;submitted=route.request().postDataJSON();
+    return route.fulfill({json:calls===1?{ok:false,error:'鉴权失败，请重试'}:{ok:true,branches:['feature/test','main','master'],defaultBranch:'master'}});
+  });
+  await f.page.goto(f.origin);await f.openConfig();
+  assert.equal(calls,0);assert(await f.page.locator('#analyze').isDisabled());
+  assert(await f.page.locator('#export').isEnabled());await f.page.locator('#play').click();
+  await f.page.waitForFunction(()=>Number(document.querySelector('#scrub').value)>0);await f.page.locator('#play').click();
+  await f.page.getByText('远程 GitLab（可选，较慢）',{exact:true}).click();
+  await f.page.locator('#read-branches').click();
+  await f.page.waitForFunction(()=>document.querySelector('#status').textContent.includes('鉴权失败'));
+  assert(await f.page.locator('#analyze').isDisabled());assert(await f.page.locator('#read-branches').isEnabled());
+  await f.page.locator('#read-branches').click();await f.page.waitForFunction(()=>!document.querySelector('#branch').disabled);
+  assert.equal(await f.page.locator('#branch').inputValue(),'main','restore saved branch before the remote default');
+  await f.page.locator('#token').fill('new-token');assert(await f.page.locator('#analyze').isDisabled());
+  assert.equal(await f.page.locator('#branch').inputValue(),'');
+  await f.page.locator('#remote-source').fill('https://example.invalid/new.git');
+  await f.page.locator('#read-branches').click();await f.page.waitForFunction(()=>!document.querySelector('#branch').disabled);
+  assert.deepEqual(submitted,{source:'https://example.invalid/new.git',token:'new-token'});
+  assert.equal(await f.page.locator('#branch').inputValue(),'master');
+  await f.page.locator('#branch').selectOption('feature/test');
+  let analysis;
+  await f.page.route('**/api/analyze',route=>{analysis=route.request().postDataJSON();return route.fulfill({json:{ok:true,manifest:m}});});
+  await f.generate();assert.equal(analysis.branch,'feature/test');
+  await f.openConfig();
+  await f.page.locator('#remote-source').fill('https://example.invalid/other.git');
+  assert(await f.page.locator('#analyze').isDisabled());assert.equal(await f.page.locator('#branch').inputValue(),'');
+});
+
+test('shallow local history completes with one click, recovers from failure and blocks duplicate actions',{timeout:20000},async t=>{
+  const f=await studioFixture(t);
+  writeFileSync(join(f.repo,'app.js'),'one\ntwo\n');f.git('add','.');f.git('commit','-m','追加');
+  const shallow=join(f.dir,'shallow');
+  execFileSync('git',['clone','--depth','1',new URL(`file://${f.repo}`).href,shallow],{stdio:'pipe'});
+  await f.page.goto(f.origin);await f.select(shallow);
+  await f.page.locator('#shallow-warning').waitFor({state:'visible'});
+  assert(await f.page.locator('#analyze').isDisabled());assert(await f.page.locator('#branch').isEnabled());
+  assert.equal(await f.page.locator('#branch').inputValue(),'main');
+  assert.match(await f.page.locator('#shallow-warning').textContent(),/git fetch --unshallow/);
+  await f.page.context().grantPermissions(['clipboard-read','clipboard-write']);
+  await f.page.locator('#copy-unshallow').click();
+  assert.equal(await f.page.evaluate(()=>navigator.clipboard.readText()),'git fetch --unshallow');
+  let completeRoute;
+  const pendingRoute=new Promise(done=>{completeRoute=done;});
+  await f.page.route('**/api/unshallow',route=>completeRoute(route));
+  await f.page.locator('#unshallow').click();
+  const route=await pendingRoute;
+  assert.deepEqual(route.request().postDataJSON(),{source:shallow});
+  assert(await f.page.locator('#unshallow').isDisabled());assert(await f.page.locator('#source').isDisabled());
+  assert(await f.page.locator('#retry-branches').isDisabled());assert(await f.page.locator('#analyze').isDisabled());
+  assert.match(await f.page.locator('#status').textContent(),/正在下载/);
+  await route.fulfill({status:400,json:{ok:false,error:'测试网络失败'}});
+  await f.page.waitForFunction(()=>document.querySelector('#status').textContent.includes('测试网络失败'));
+  assert(await f.page.locator('#unshallow').isEnabled());assert(await f.page.locator('#source').isEnabled());
+  assert(await f.page.locator('#shallow-warning').isVisible());assert(await f.page.locator('#analyze').isDisabled());
+  await f.page.unroute('**/api/unshallow');
+  await f.page.locator('#unshallow').click();await f.page.waitForFunction(()=>!document.querySelector('#analyze').disabled);
+  assert.match(await f.page.locator('#status').textContent(),/历史已补全/);
+  assert(await f.page.locator('#shallow-warning').isHidden());
+  const m=await f.generate();assert.equal(m.totalChurn,2);assert.equal(m.rules.historyCompleteness,'full-v1');
 });

@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import { execFile, execFileSync } from "node:child_process";
 import { createServer } from "node:http";
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { basename, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { repositoryInfo, requireFullHistory } from "./repository.mjs";
 import { analyzeHistory } from "./analyze-history.mjs";
 import { exportVideo } from "./export-video.mjs";
 
@@ -51,9 +52,7 @@ function pickLocalDirectory() {
 }
 
 function localRepository(source) {
-  const candidate = resolve(source);
-  try { return execFileSync("git", ["-C", candidate, "rev-parse", "--show-toplevel"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(); } catch {}
-  throw new Error("本地路径不是 Git 仓库");
+  return repositoryInfo(resolve(source)).path;
 }
 
 function resolveBranch(repo, requested) {
@@ -63,23 +62,76 @@ function resolveBranch(repo, requested) {
   return requested;
 }
 
-function cloneRepository(source, token, branch) {
-  const key = createHash("sha256").update(`${source}\0${token ? "token" : "public"}`).digest("hex").slice(0, 16);
-  const target = join(cacheDir, key);
+function gitAuthentication(token) {
   const env = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
   const authArgs = token ? ["-c", "credential.helper="] : [];
   if (token) {
     env.GIT_ASKPASS = join(root, "scripts", "git-askpass.sh");
     env.GIT_HISTORY_TOKEN = token;
   }
-  try {
-    statSync(join(target, ".git"));
-    execFileSync("git", [...authArgs, "-C", target, "fetch", "--no-tags", "origin", `+${branch}:refs/remotes/origin/${branch}`], { stdio: "ignore", env });
+  return { env, authArgs };
+}
+
+async function readBranches(body) {
+  const source = String(body.source || "").trim();
+  if (!source) throw new Error("请输入仓库链接或本地 Git 路径");
+  let branches, defaultBranch, shallow;
+  if (source.startsWith("http://") || source.startsWith("https://")) {
+    const { env, authArgs } = gitAuthentication(body.token);
+    const output = await new Promise((done, reject) => {
+      execFile("git", [...authArgs, "ls-remote", "--symref", source, "HEAD", "refs/heads/*"],
+        { env, encoding: "utf8", timeout: 30_000, maxBuffer: 8 * 1024 * 1024 }, (error, stdout) => {
+          if (error) return reject(new Error(error.killed ? "读取分支超时，请重试" : "读取远程分支失败，请检查 URL、Token 和网络后重试"));
+          done(stdout);
+        });
+    });
+    branches = [...new Set([...output.matchAll(/^[0-9a-f]+\trefs\/heads\/(.+)$/gm)].map(match => match[1]))].sort();
+    defaultBranch = output.match(/^ref: refs\/heads\/(.+)\tHEAD$/m)?.[1];
+  } else {
+    const repo = localRepository(source);
+    shallow = repositoryInfo(repo).shallow;
+    branches = execFileSync("git", ["-C", repo, "for-each-ref", "--sort=refname", "--format=%(refname:strip=2)", "refs/heads/"], { encoding: "utf8" }).trim().split("\n").filter(Boolean);
+    try { defaultBranch = execFileSync("git", ["-C", repo, "symbolic-ref", "--quiet", "--short", "HEAD"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(); } catch {}
+  }
+  if (!branches.length) throw new Error("仓库没有可用分支，请先创建至少一个提交");
+  return { branches, defaultBranch: branches.includes(defaultBranch) ? defaultBranch : branches[0], ...(shallow === undefined ? {} : { shallow }) };
+}
+
+function cloneRepository(source, token, branch) {
+  const key = createHash("sha256").update(`${source}\0${token ? "token" : "public"}`).digest("hex").slice(0, 16);
+  const target = join(cacheDir, key);
+  const { env, authArgs } = gitAuthentication(token);
+  let info;
+  try { info = repositoryInfo(target); if (info.path !== resolve(target)) info = undefined; } catch {}
+  if (info) {
+    requireFullHistory(target);
+    const ref = info.bare ? `refs/heads/${branch}` : `refs/remotes/origin/${branch}`;
+    execFileSync("git", [...authArgs, "-C", target, "fetch", "--no-tags", "origin", `+refs/heads/${branch}:${ref}`], { stdio: "pipe", env });
     return target;
-  } catch {}
+  }
   try { rmSync(target, { recursive: true, force: true }); } catch {}
-  execFileSync("git", [...authArgs, "clone", "--no-tags", "--single-branch", "--branch", branch, source, target], { stdio: "pipe", maxBuffer: 4 * 1024 * 1024, env });
+  execFileSync("git", [...authArgs, "clone", "--bare", "--no-tags", "--single-branch", "--branch", branch, source, target], { stdio: "pipe", maxBuffer: 4 * 1024 * 1024, env });
   return target;
+}
+
+const completingHistory = new Set();
+async function completeHistory(body) {
+  const source = String(body.source || "").trim();
+  if (!source || /^https?:\/\//.test(source)) throw new Error("请选择本地 Git 仓库后补全历史");
+  const repo = localRepository(source);
+  if (completingHistory.has(repo)) throw new Error("此仓库正在补全历史，请稍候");
+  if (!repositoryInfo(repo).shallow) return;
+  completingHistory.add(repo);
+  try {
+    const { env } = gitAuthentication();
+    await new Promise((done, reject) => {
+      execFile("git", ["-C", repo, "fetch", "--unshallow"], { env, encoding: "utf8", maxBuffer: 4 * 1024 * 1024 }, error => {
+        if (error) return reject(new Error("补全历史失败，请检查网络、远程仓库和本机 Git 登录凭据，或在仓库中手动执行 git fetch --unshallow"));
+        done();
+      });
+    });
+    if (repositoryInfo(repo).shallow) throw new Error("远程历史仍不完整，请使用拥有完整历史的远程仓库后重试");
+  } finally { completingHistory.delete(repo); }
 }
 
 async function analyze(body) {
@@ -88,13 +140,14 @@ async function analyze(body) {
   const branch = String(body.branch || "main");
   const remote = source.startsWith("http://") || source.startsWith("https://");
   const repo = remote ? cloneRepository(source, body.token, branch) : localRepository(source);
-  const resolvedBranch = resolveBranch(repo, remote ? `origin/${branch}` : branch);
+  const info = requireFullHistory(repo);
+  const resolvedBranch = resolveBranch(repo, remote && !info.bare ? `origin/${branch}` : branch);
   const duration = Math.min(180, Math.max(15, Number(body.duration) || 60));
   const cacheKey = createHash("sha256").update(`${source}\0${remote ? branch : resolvedBranch}`).digest("hex").slice(0, 20);
   const cachePath = join(manifestCacheDir, `${cacheKey}.json`);
   let previousManifest = null;
   try { previousManifest = JSON.parse(readFileSync(cachePath, "utf8")); } catch {}
-  if (remote && previousManifest?.project.branch === branch) previousManifest.project.branch = resolvedBranch;
+  if (remote && [branch, `origin/${branch}`].includes(previousManifest?.project.branch)) previousManifest.project.branch = resolvedBranch;
   const manifest = await analyzeHistory({ repo, branch: resolvedBranch, duration, projectName: basename(repo), previousManifest, timeZone: String(body.timeZone || "Asia/Shanghai"), maxAuthors: body.maxAuthors, accountLinks: body.accountLinks });
   manifest.project.source = source;
   writeFileSync(cachePath, `${JSON.stringify(manifest, null, 2)}\n`);
@@ -114,6 +167,13 @@ const server = createServer(async (request, response) => {
     if (request.method === "GET" && url.pathname === "/api/pick-local") {
       const path = await pickLocalDirectory();
       return json(response, 200, path ? { ok: true, path } : { ok: false, cancelled: true });
+    }
+    if (request.method === "POST" && url.pathname === "/api/branches") {
+      return json(response, 200, { ok: true, ...await readBranches(await readBody(request)) });
+    }
+    if (request.method === "POST" && url.pathname === "/api/unshallow") {
+      await completeHistory(await readBody(request));
+      return json(response, 200, { ok: true });
     }
     if (request.method === "POST" && url.pathname === "/api/analyze") {
       const manifest = await analyze(await readBody(request));

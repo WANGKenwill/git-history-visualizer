@@ -267,8 +267,8 @@ export function drawHistory(ctx, manifest, time) {
     const light=channels.map(value=>Math.round(value+(255-value)*.25)).join(',');
     const dark=channels.map(value=>Math.round(value*.45)).join(',');
     shell.addColorStop(0,`rgba(${light},.34)`);
-    shell.addColorStop(.6,`${node.color}29`);
-    shell.addColorStop(1,`rgba(${dark},.12)`);
+    shell.addColorStop(.6,`${node.color}38`);
+    shell.addColorStop(1,`rgba(${dark},.18)`);
     ctx.fillStyle=shell;
     circle(ctx,node.x,node.y,r);ctx.fill();
     if(state.retentionAvailable && node.visualRetainedLines>0){
@@ -279,9 +279,6 @@ export function drawHistory(ctx, manifest, time) {
       core.addColorStop(1,`rgba(${ballTone(channels,.065)},.85)`);
       ctx.fillStyle=core;circle(ctx,node.x,node.y,inner);ctx.fill();
     }
-    ctx.globalAlpha=1;ctx.shadowBlur=0;ctx.strokeStyle=node.color;ctx.lineWidth=2;
-    circle(ctx,node.x,node.y,r);ctx.stroke();
-    if(since<.6){ctx.globalAlpha=(1-since/.6)*.6;circle(ctx,node.x,node.y,r+since*25);ctx.stroke();ctx.globalAlpha=1;}
     ctx.restore();
   }
   // Local ripples mark the exact absorption point.

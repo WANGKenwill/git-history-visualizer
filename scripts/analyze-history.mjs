@@ -1,7 +1,8 @@
+import { requireFullHistory } from './repository.mjs';
 import { analyzeRetention, numstatEntries } from './retention.mjs';
 import { accountLinks as normalizeAccountLinks } from '../src/accounts.js';
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { prepareHistory } from "../src/visualizer.js";
 import { basename, dirname, resolve } from "node:path";
 
@@ -95,7 +96,7 @@ function normalizedTimeline(commits, duration) {
 }
 
 export async function analyzeHistory({ repo, branch = "main", excludes = DEFAULT_EXCLUDES, duration = 60, projectName = "Git history", previousManifest = null, timeZone = "Asia/Shanghai", maxAuthors = 16, accountLinks }) {
-  if (!existsSync(resolve(repo, ".git"))) throw new Error(`不是 Git 仓库: ${repo}`);
+  requireFullHistory(repo);
   new Intl.DateTimeFormat("zh-CN", { timeZone }).format(0);
   duration = Math.min(180, Math.max(15, Number(duration) || 60));
   maxAuthors = Math.min(32, Math.max(1, Math.floor(Number(maxAuthors) || 16)));
@@ -105,7 +106,7 @@ export async function analyzeHistory({ repo, branch = "main", excludes = DEFAULT
     .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
     .replace(/\*\*\/|\*\*|\*/g, (wildcard) => wildcard === "**/" ? "(?:.*/)?" : wildcard === "**" ? ".*" : "[^/]*")}$`));
   const compatible = previousManifest?.version === 2 && previousManifest.project.repo === repo && previousManifest.project.branch === branch && JSON.stringify(previousManifest.rules.excludes) === rulesKey;
-  const currentFormat = compatible && previousManifest.rules.exclusionMatching === "path-glob" && previousManifest.rules.numstatFormat === "nul-v1";
+  const currentFormat = compatible && previousManifest.rules.exclusionMatching === "path-glob" && previousManifest.rules.numstatFormat === "nul-v1" && previousManifest.rules.historyCompleteness === "full-v1";
   const cacheHit = currentFormat && head === previousManifest.project.head;
   const allCommits = cacheHit ? [] : parseLog(repo, head, false);
   const regular = allCommits.filter((commit) => commit.parents.length < 2);
@@ -132,7 +133,7 @@ export async function analyzeHistory({ repo, branch = "main", excludes = DEFAULT
   const manifest = {
     version: 2,
     project: { name: projectName, branch, repo, head, generatedAt: new Date().toISOString() },
-    rules: { excludes, exclusionMatching: "path-glob", numstatFormat: "nul-v1", timeline: "authored-time-compressed-gaps", contribution: "additions+deletions", mergeResolution: "excluded", identity: "author-email" },
+    rules: { excludes, exclusionMatching: "path-glob", numstatFormat: "nul-v1", historyCompleteness: "full-v1", timeline: "authored-time-compressed-gaps", contribution: "additions+deletions", mergeResolution: "excluded", identity: "author-email" },
     settings: { timeZone, maxAuthors, accountLinks: normalizeAccountLinks(authors, accountLinks ?? (compatible ? previousManifest.settings.accountLinks : {})) },
     layout: compatible ? previousManifest.layout : {},
     retention: retentionResult.retention,
