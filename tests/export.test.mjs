@@ -13,6 +13,7 @@ test('export page matches interactive Canvas pixels and blocks external requests
   const manifest = JSON.parse(readFileSync(new URL('../data/manifest.json', import.meta.url)));
   const assets = new Map([
     ['/studio.html', ['text/html', readFileSync(new URL('../studio.html', import.meta.url))]],
+    ['/src/i18n.js', ['text/javascript', readFileSync(new URL('../src/i18n.js', import.meta.url))]],
     ['/src/studio.js', ['text/javascript', readFileSync(new URL('../src/studio.js', import.meta.url))]],
     ['/src/visualizer.js', ['text/javascript', readFileSync(new URL('../src/visualizer.js', import.meta.url))]],
     ['/src/motion.js', ['text/javascript', readFileSync(new URL('../src/motion.js', import.meta.url))]],
@@ -26,7 +27,7 @@ test('export page matches interactive Canvas pixels and blocks external requests
   let session, previewContext;
   try {
     session = await createExportPage(manifest);
-    previewContext = await session.page.context().browser().newContext();
+    previewContext = await session.page.context().browser().newContext({locale:"zh-CN"});
     const preview = await previewContext.newPage();
     await preview.goto(`http://127.0.0.1:${server.address().port}/studio.html`);
     await preview.waitForFunction(() => document.querySelector('#summary strong')?.textContent !== '');
@@ -36,10 +37,14 @@ test('export page matches interactive Canvas pixels and blocks external requests
       const digest = await crypto.subtle.digest('SHA-256', pixels);
       return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
     }, selector);
-    for (const time of [0, manifest.duration / 2, manifest.duration]) {
-      await session.page.evaluate(time => window.renderFrame(window.exportManifest, time), time);
-      await preview.locator('#scrub').evaluate((el, time) => { el.value = time; el.dispatchEvent(new Event('input', { bubbles: true })); }, time);
-      assert.equal(await pixelHash(session.page, '#scene'), await pixelHash(preview, '#preview'));
+    for (const locale of ['zh-CN', 'en']) {
+      await preview.locator('#language').selectOption(locale);
+      await session.page.evaluate(locale => { window.exportManifest = { ...window.exportManifest, settings: { ...window.exportManifest.settings, locale } }; }, locale);
+      for (const time of [0, manifest.duration / 2, manifest.duration]) {
+        await session.page.evaluate(time => window.renderFrame(window.exportManifest, time), time);
+        await preview.locator('#scrub').evaluate((el, time) => { el.value = time; el.dispatchEvent(new Event('input', { bubbles: true })); }, time);
+        assert.equal(await pixelHash(session.page, '#scene'), await pixelHash(preview, '#preview'), `${locale} at ${time}`);
+      }
     }
     const reached = await session.page.evaluate(async () => { try { await fetch('https://example.com/offline-test'); return true; } catch { return false; } });
     assert.equal(reached, false);
@@ -83,5 +88,23 @@ test('MP4 validates final retained totals and removes incomplete output on misma
     const broken=join(dir,'mismatch.mp4');
     await assert.rejects(exportVideo({manifest:{...manifest,retention:{...manifest.retention,mappedLines:1}},output:broken}),/最终存留量.*不一致/);
     assert.equal(existsSync(broken),false);
+  } finally {rmSync(dir,{recursive:true,force:true});}
+});
+
+
+test('Chinese and English MP4 snapshots decode with identical final contribution and retention totals',async()=>{
+  const dir=mkdtempSync(join(tmpdir(),'bilingual-export-'));
+  try {
+    for (const locale of ['zh-CN','en']) {
+      const manifest={...empty,duration:2,settings:{...empty.settings,locale},totalChurn:3,
+        authors:[{id:'a',name:'Original author',churn:3,retainedLines:1}],
+        commits:[{sha:'a',authorId:'a',authoredAt:'2026-01-01T00:00:00Z',at:0,churn:3,additions:2,deletions:1,retainedLines:1}],
+        retention:{version:2,totalLines:1,mappedLines:1,unmappedLines:0}};
+      const output=join(dir,`${locale}.mp4`);
+      assert.deepEqual(await exportVideo({manifest,output}),{frames:60,finalChurn:3,finalRetainedLines:1});
+      const probe=JSON.parse(execFileSync('ffprobe',['-v','error','-show_streams','-show_format','-of','json',output]));
+      assert.equal(Number(probe.format.duration),2);assert.equal(Number(probe.streams[0].nb_frames),60);
+      execFileSync('ffmpeg',['-v','error','-i',output,'-f','null','-'],{stdio:'pipe'});
+    }
   } finally {rmSync(dir,{recursive:true,force:true});}
 });

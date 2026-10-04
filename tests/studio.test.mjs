@@ -11,7 +11,7 @@ async function studioFixture(t) {
   const f=await serverFixture(t);
   const browser=await chromium.launch({headless:true});
   t.after(()=>browser.close());
-  const context=await browser.newContext();
+  const context=await browser.newContext({locale:"zh-CN"});
   const page=await context.newPage();
   await page.addInitScript(()=>{
     const realFetch=window.fetch;
@@ -76,7 +76,7 @@ test('typed local paths preserve Unicode and spaces, clear remote URLs and omit 
 test('picker cancellation and failure retain manually entered paths',{timeout:20000},async(t)=>{
   const f=await studioFixture(t);await f.page.goto(f.origin);
   await f.page.locator('#source').fill(f.repo);
-  for(const result of [{ok:false,cancelled:true},{ok:false,error:'弹窗不可用'}]) {
+  for(const result of [{ok:false,cancelled:true},{ok:false,error:'弹窗不可用',errorCode:'folderUnavailable'}]) {
     await f.page.route('**/api/pick-local',route=>route.fulfill({json:result}));
     await f.page.locator('#pick-local').click();await f.page.waitForFunction(()=>!document.querySelector('#pick-local').disabled);
     assert.equal(await f.page.locator('#source').inputValue(),f.repo);
@@ -245,13 +245,13 @@ test('Studio restores export controls after streamed errors, premature EOF and n
     await f.page.evaluate(kind=>{
       const c=window.exportController;
       c.enqueue(new TextEncoder().encode('{"type":"start"}\n'));
-      if(kind==='error'){const bytes=new TextEncoder().encode('{"type":"error","error":"本地编码失败"}\n');const split=new TextEncoder().encode('{"type":"error","error":"').length+1;c.enqueue(bytes.slice(0,split));c.enqueue(bytes.slice(split));c.close();}
+      if(kind==='error'){const bytes=new TextEncoder().encode('{"type":"error","error":"本地编码失败","errorCode":"error.encoding"}\n');const split=new TextEncoder().encode('{"type":"error","error":"').length+1;c.enqueue(bytes.slice(0,split));c.enqueue(bytes.slice(split));c.close();}
       else if(kind==='eof')c.close();
       else c.error(new Error('连接断开'));
     },kind);
     await f.page.waitForFunction(()=>!document.querySelector('#export').disabled);
     const status=await f.page.locator('#export-status').textContent();assert.match(status,/导出失败/);
-    assert.match(status,kind==='error'?/本地编码失败/:kind==='eof'?/未收到完成结果/:/连接断开/);
+    assert.match(status,kind==='error'?/视频编码失败/:kind==='eof'?/未收到完成结果/:/查看终端日志/);
     assert.equal(await f.page.locator('#export-status a').count(),0);
   }
 });
@@ -310,7 +310,7 @@ test('fullscreen includes controls, preserves aspect ratio and follows exit even
   assert.equal(await f.page.locator('#statistics-details').evaluate(el=>el.open),true);
   assert.equal(await f.page.locator('#accounts').evaluate(el=>el.open),true);
   await f.page.evaluate(()=>{document.querySelector('#player').requestFullscreen=()=>Promise.reject(new Error('浏览器拒绝请求'));});
-  await f.page.locator('#fullscreen').click();await f.page.locator('#player-status').getByText('无法切换全屏：浏览器拒绝请求').waitFor();
+  await f.page.locator('#fullscreen').click();await f.page.locator('#player-status').getByText('无法切换全屏：操作失败，请重试并查看终端日志。').waitFor();
   assert.equal(await f.page.locator('#fullscreen').textContent(),'全屏');
 });
 
@@ -355,7 +355,7 @@ test('remote branches require an explicit read, allow retry and invalidate on UR
   let calls=0,submitted;
   await f.page.route('**/api/branches',route=>{
     calls++;submitted=route.request().postDataJSON();
-    return route.fulfill({json:calls===1?{ok:false,error:'鉴权失败，请重试'}:{ok:true,branches:['feature/test','main','master'],defaultBranch:'master'}});
+    return route.fulfill({json:calls===1?{ok:false,error:'鉴权失败，请重试',errorCode:'error.branchRemote'}:{ok:true,branches:['feature/test','main','master'],defaultBranch:'master'}});
   });
   await f.page.goto(f.origin);await f.openConfig();
   assert.equal(calls,0);assert(await f.page.locator('#analyze').isDisabled());
@@ -363,7 +363,7 @@ test('remote branches require an explicit read, allow retry and invalidate on UR
   await f.page.waitForFunction(()=>Number(document.querySelector('#scrub').value)>0);await f.page.locator('#play').click();
   await f.page.getByText('远程 GitLab（可选，较慢）',{exact:true}).click();
   await f.page.locator('#read-branches').click();
-  await f.page.waitForFunction(()=>document.querySelector('#status').textContent.includes('鉴权失败'));
+  await f.page.waitForFunction(()=>document.querySelector('#status').textContent.includes('读取远程分支失败'));
   assert(await f.page.locator('#analyze').isDisabled());assert(await f.page.locator('#read-branches').isEnabled());
   await f.page.locator('#read-branches').click();await f.page.waitForFunction(()=>!document.querySelector('#branch').disabled);
   assert.equal(await f.page.locator('#branch').inputValue(),'main','restore saved branch before the remote default');
@@ -404,8 +404,8 @@ test('shallow local history completes with one click, recovers from failure and 
   assert(await f.page.locator('#unshallow').isDisabled());assert(await f.page.locator('#source').isDisabled());
   assert(await f.page.locator('#retry-branches').isDisabled());assert(await f.page.locator('#analyze').isDisabled());
   assert.match(await f.page.locator('#status').textContent(),/正在下载/);
-  await route.fulfill({status:400,json:{ok:false,error:'测试网络失败'}});
-  await f.page.waitForFunction(()=>document.querySelector('#status').textContent.includes('测试网络失败'));
+  await route.fulfill({status:400,json:{ok:false,error:'测试网络失败',errorCode:'error.unshallowFailed'}});
+  await f.page.waitForFunction(()=>document.querySelector('#status').textContent.includes('补全历史失败'));
   assert(await f.page.locator('#unshallow').isEnabled());assert(await f.page.locator('#source').isEnabled());
   assert(await f.page.locator('#shallow-warning').isVisible());assert(await f.page.locator('#analyze').isDisabled());
   await f.page.unroute('**/api/unshallow');
@@ -430,10 +430,10 @@ test('analysis progress decodes split messages and failed streams retain the cur
   await send(JSON.stringify({type:'complete',ok:true,manifest}));await f.page.evaluate(()=>window.analysisController.close());
   await f.page.waitForFunction(()=>!document.querySelector('#analyze').disabled);assert.match(await f.page.locator('#status').textContent(),/已生成/);
   for(const error of [true,false]){
-    await start();if(error)await send('{"type":"error","error":"下载超时，请重新生成"}\n');
+    await start();if(error)await send('{"type":"error","error":"下载超时，请重新生成","errorCode":"error.downloadTimeout"}\n');
     await f.page.evaluate(()=>window.analysisController.close());
     await f.page.waitForFunction(()=>!document.querySelector('#analyze').disabled);
-    assert.match(await f.page.locator('#status').textContent(),error?/下载超时/:/未收到完成结果/);
+    assert.match(await f.page.locator('#status').textContent(),error?/下载历史超时/:/未收到完成结果/);
     assert.equal(await f.page.locator('#project-title').textContent(),manifest.project.name);
   }
 });

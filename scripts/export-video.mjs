@@ -1,3 +1,4 @@
+import { AppError } from '../src/i18n.js';
 import { chromium } from 'playwright';
 import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -11,7 +12,7 @@ export const FPS = 30;
 
 export async function createExportPage(manifest) {
   if (!existsSync(chromium.executablePath())) {
-    throw new Error('缺少本地 Chromium，请联网准备时运行 npm run setup:browser；导出不会自动下载');
+    throw new AppError('error.chromiumMissing');
   }
   const assets = new Map([
     ['/index.html', ['text/html; charset=utf-8', readFileSync(resolve(root, 'index.html'))]],
@@ -42,7 +43,7 @@ export async function createExportPage(manifest) {
       return route.continue();
     });
     const page = await context.newPage();
-    const assertLocal = () => { if (blocked.length) throw new Error(`导出页面试图访问外网，已阻止：${new URL(blocked[0]).origin}`); };
+    const assertLocal = () => { if (blocked.length) throw new AppError('error.exportNetwork', {origin: new URL(blocked[0]).origin}); };
     await page.goto(`${origin}/index.html`);
     await page.waitForFunction(() => typeof window.renderFrame === 'function');
     await page.evaluate(data => { window.exportManifest = data; }, manifest);
@@ -57,10 +58,10 @@ export async function createExportPage(manifest) {
 export async function exportVideo({ manifest, output, ffmpegPath = 'ffmpeg', onProgress = () => {} }) {
   // Snapshot before the first await: concurrent analysis cannot change this export.
   manifest = structuredClone(manifest);
-  if (!(manifest.duration > 0 && Number.isFinite(manifest.duration))) throw new Error('导出时长无效');
-  if (existsSync(output)) throw new Error('输出文件已存在，请选择其他文件名');
+  if (!(manifest.duration > 0 && Number.isFinite(manifest.duration))) throw new AppError('error.invalidDuration');
+  if (existsSync(output)) throw new AppError('error.outputExists');
   try { execFileSync(ffmpegPath, ['-version'], { stdio: 'ignore', timeout: 5000 }); }
-  catch { throw new Error('缺少可用的本地 FFmpeg，请提前安装并加入 PATH；导出不会自动下载'); }
+  catch { throw new AppError('error.ffmpegMissing'); }
   mkdirSync(dirname(output), { recursive: true });
   let session, encoder, encoderDone;
   let stderr = '', pipeError;
@@ -79,23 +80,25 @@ export async function exportVideo({ manifest, output, ffmpegPath = 'ffmpeg', onP
         return { png: document.querySelector('#scene').toDataURL('image/png').split(',')[1], churn: state.churn, retainedLines: state.retainedLines };
       }, time);
       session.assertLocal();
-      if (pipeError || encoder.exitCode !== null) throw new Error(stderr || 'FFmpeg 提前退出');
+      if (pipeError || encoder.exitCode !== null) throw new Error(stderr || 'FFmpeg 提前退出', { cause: new AppError('error.encoding') });
       if (!encoder.stdin.write(Buffer.from(rendered.png, 'base64'))) await once(encoder.stdin, 'drain');
       finalChurn = rendered.churn; finalRetainedLines = rendered.retainedLines;
       onProgress(frame + 1, frames);
     }
     encoder.stdin.end();
     const result = await encoderDone;
-    if (result.error || result.code !== 0) throw new Error(stderr || result.error?.message || 'FFmpeg 编码失败');
-    if (finalChurn !== manifest.totalChurn) throw new Error('末帧累计量与完整统计不一致');
-    if([1,2].includes(manifest.retention?.version) && finalRetainedLines!==manifest.retention.mappedLines)throw new Error("末帧最终存留量与完整统计不一致");
+    if (result.error || result.code !== 0) throw new Error(stderr || result.error?.message || 'FFmpeg 编码失败', { cause: new AppError('error.encoding') });
+    if (finalChurn !== manifest.totalChurn) throw new AppError('error.finalChurn');
+    if([1,2].includes(manifest.retention?.version) && finalRetainedLines!==manifest.retention.mappedLines)throw new AppError('error.finalRetention');
     session.assertLocal();
     return { frames, finalChurn, ...([1,2].includes(manifest.retention?.version) ? {finalRetainedLines} : {}) };
   } catch (error) {
     if (encoder && encoder.exitCode === null) encoder.kill('SIGKILL');
     if (encoderDone) await encoderDone;
     rmSync(output, { force: true });
-    throw new Error(`导出失败：${error.message}`, { cause: error });
+    const wrapped = new Error(`导出失败：${error.message}`, { cause: error });
+    wrapped.code = error.code || error.cause?.code; wrapped.params = error.params || error.cause?.params;
+    throw wrapped;
   } finally { await session?.close(); }
 }
 

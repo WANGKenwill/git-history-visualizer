@@ -1,3 +1,4 @@
+import { t, normalizeLocale, AppError } from './i18n.js';
 import { precomputeMotion, motionPosition, safetyRadius } from './motion.js';
 import { groupedAuthors } from './accounts.js';
 export const WIDTH = 1920;
@@ -9,8 +10,9 @@ const INK = '#090F18', TEXT = '#E7EDF3', MUTED = '#A2B1C0', ACCENT = '#A3D3D3';
 const MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace';
 const prepared = new WeakMap();
 const clocks = new WeakMap();
+const compactNumbers = Object.fromEntries(['zh-CN', 'en'].map(locale => [locale, new Intl.NumberFormat(locale, { notation: 'compact', maximumFractionDigits: 1 })]));
 const clamp = (v) => Math.max(0, Math.min(1, v));
-const number = (v) => new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 1 }).format(v);
+
 
 function hash(value) {
   let h = 2166136261;
@@ -55,7 +57,7 @@ function prepareClock(manifest) {
     return { firstEnd, lastStart, skippedDays, firstDuration: firstEnd - start.timestamp,
       retainedDuration: firstEnd - start.timestamp + end.timestamp - lastStart };
   });
-  const result = { points, spans, formatter, label: new Intl.DateTimeFormat('zh-CN', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }) };
+  const result = { points, spans, formatter, label: new Intl.DateTimeFormat(normalizeLocale(manifest.settings?.locale), { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }) };
   clocks.set(manifest, result); return result;
 }
 
@@ -109,7 +111,7 @@ function pack(authors, previousPositions = {}) {
     if (placed.length === authors.length) return placed;
   }
   if (Object.keys(previousPositions).length) return pack(authors);
-  throw new Error('作者布局空间不足，请减少显示人数');
+  throw new AppError('error.layout');
 }
 
 export function particleRadius(churn) {
@@ -117,6 +119,7 @@ export function particleRadius(churn) {
 }
 
 export function prepareHistory(manifest) {
+  const tr = (key, params) => t(manifest.settings?.locale, key, params);
   if (prepared.has(manifest)) return prepared.get(manifest);
   const identities = groupedAuthors(manifest);
   identities.authors = identities.authors.map(a => ({ ...a, color: PALETTE[hash(a.id) % PALETTE.length] }));
@@ -124,7 +127,7 @@ export function prepareHistory(manifest) {
   const visible = ranked.slice(0, manifest.settings?.maxAuthors || 16).map((a) => ({ ...a }));
   const hidden = ranked.slice(visible.length);
   const selected = new Set(visible.map((a) => a.id));
-  if (hidden.length) visible.push({ id: '__other__', name: `其他 · ${hidden.length} 人`, color: '#91A0B2', churn: hidden.reduce((sum, a) => sum + a.churn, 0), hiddenCount: hidden.length, retainedLines: hidden.reduce((sum,a)=>sum+(a.retainedLines||0),0) });
+  if (hidden.length) visible.push({ id: '__other__', name: tr('otherAuthors', { count: hidden.length }), color: '#91A0B2', churn: hidden.reduce((sum, a) => sum + a.churn, 0), hiddenCount: hidden.length, retainedLines: hidden.reduce((sum,a)=>sum+(a.retainedLines||0),0) });
   const nodes = pack(visible, manifest.layout || {});
   const nodeById = new Map(nodes.map((a) => [a.id, a]));
   const formatter = clockFormatter(manifest.settings?.timeZone || 'Asia/Shanghai');
@@ -216,6 +219,9 @@ function ballTone(channels,luminance) {
   return linear.map(value=>{const c=value*scale;return Math.floor(255*(c<=.0031308 ? c*12.92 : 1.055*c**(1/2.4)-.055));}).join(',');
 }
 export function drawHistory(ctx, manifest, time) {
+  const locale = normalizeLocale(manifest.settings?.locale);
+  const tr = (key, params) => t(locale, key, params);
+  const number = compactNumbers[locale].format;
   const state = historyState(manifest, time);
   const clock = clockState(manifest, time);
   ctx.clearRect(0,0,WIDTH,HEIGHT);
@@ -226,8 +232,8 @@ export function drawHistory(ctx, manifest, time) {
   ctx.font='18px system-ui'; ctx.fillStyle=MUTED;
   ctx.fillText(fitText(ctx,manifest.project.branch,560),84,111);
   ctx.textAlign='right'; ctx.font=`24px ${MONO}`; ctx.fillStyle=TEXT;
-  ctx.fillText(clock ? clock.label : '等待首次贡献',1838,1015);
-  if (clock?.skippedDays) { ctx.font='16px system-ui'; ctx.fillStyle=ACCENT; ctx.fillText(`跳过 ${clock.skippedDays} 个无提交日`,1838,980); }
+  ctx.fillText(clock ? clock.label : tr('waitingContribution'),1838,1015);
+  if (clock?.skippedDays) { ctx.font='16px system-ui'; ctx.fillStyle=ACCENT; ctx.fillText(tr('skippedDays', { count: clock.skippedDays }),1838,980); }
 
   ctx.strokeStyle='#304152'; ctx.lineWidth=1; ctx.beginPath(); ctx.ellipse(CX,CY,RX,RY,0,0,Math.PI*2); ctx.stroke();
   for (let h=0;h<24;h++) {
@@ -307,7 +313,7 @@ export function drawHistory(ctx, manifest, time) {
     if(!node.commitCount)continue;
     ctx.save();ctx.textAlign='center';
     const largeLabel=ballRadius(node)>=60;
-    const value=state.retentionAvailable && time>=manifest.duration-1e-8 ? `${number(node.churn)}（${number(node.retainedLines)}）` : number(node.churn);
+    const value=state.retentionAvailable && time>=manifest.duration-1e-8 ? tr('finalValues', {changes: number(node.churn), retained: number(node.retainedLines)}) : number(node.churn);
     ctx.font=`600 ${largeLabel ? 24 : 16}px system-ui`;
     ctx.fillStyle=TEXT;
     ctx.fillText(node.name,node.x,node.y-4);
@@ -316,14 +322,14 @@ export function drawHistory(ctx, manifest, time) {
   }
 
   ctx.textAlign='left';ctx.font='17px system-ui';ctx.fillStyle=MUTED;
-  ctx.fillText('外圈 = 累计新增 + 删除   ·   粒子 = 单次改动量   ·   入口 = 作者提交时刻',82,980);
-  ctx.fillText(state.retentionAvailable ? '内芯 = 最终 HEAD 存留，非历史当天存量   ·   末帧数字 = 改动（存留）' : '最终存留未分析：请重新生成',82,1009);
-  ctx.textAlign='right'; ctx.fillStyle=TEXT; ctx.font=`600 32px ${MONO}`; ctx.fillText(`总变更 ${number(state.churn)} 行`,1838,77);
+  ctx.fillText(tr('outerLegend'),82,980);
+  ctx.fillText(state.retentionAvailable ? tr('innerLegend') : tr('regenerateRetention'),82,1009);
+  ctx.textAlign='right'; ctx.fillStyle=TEXT; ctx.font=`600 32px ${MONO}`; ctx.fillText(tr('churnLines', { count: number(state.churn) }),1838,77);
   if(state.retentionAvailable) {
     ctx.font=`23px ${MONO}`;ctx.fillStyle=ACCENT;
-    ctx.fillText(`留存 ${number(state.retainedLines)} 行`,1838,112);
+    ctx.fillText(tr('retainedLines', { count: number(state.retainedLines) }),1838,112);
   } else {
-    ctx.font='18px system-ui';ctx.fillStyle=MUTED;ctx.fillText('最终存留未分析',1838,112);
+    ctx.font='18px system-ui';ctx.fillStyle=MUTED;ctx.fillText(tr('retentionMissing'),1838,112);
   }
 
   ctx.strokeStyle='#294156';ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(82,1043);ctx.lineTo(1838,1043);ctx.stroke();

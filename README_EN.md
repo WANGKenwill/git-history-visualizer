@@ -48,11 +48,11 @@ Open http://127.0.0.1:4173 to play the demo. On macOS, the browser opens automat
 
 ## Usage
 
-The interface is currently in Chinese.
+Choose 中文 / English in the top-right corner. The first visit follows your browser language; later visits remember your choice. The interface, preview and new video exports share one language. Switching does not require another analysis.
 
-1. Select a local Git repository, or enter a remote GitLab URL and click **读取分支** (“Read branches”). Provide a token for private repositories when needed.
-2. Choose a branch, duration, time zone, and author limit, then click **生成可视化** (“Generate visualization”). By default, 16 authors are displayed; the rest are grouped as **其他** (“Other”).
-3. Play, scrub, or enter fullscreen. Click an author circle for statistics, or click **导出 MP4** (“Export MP4”) to save a video.
+1. Select a local Git repository, or enter a remote GitLab URL and click **Read branches**. Provide a token for private repositories when needed.
+2. Choose a branch, duration, time zone, and author limit, then click **Generate visualization**. By default, 16 authors are displayed; the rest are grouped as **Other**.
+3. Play, scrub, or enter fullscreen. Click an author circle for statistics, or click **Export MP4** to save a video.
 
 Generation displays analysis stages and file progress for retained lines, reusing the retention cache when available. Only one analysis runs at a time. Remote downloads, updates, and full-history fetches time out after five minutes with retry guidance. Failed analysis preserves the previous visualization.
 

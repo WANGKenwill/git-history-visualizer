@@ -1,3 +1,4 @@
+import { AppError } from '../src/i18n.js';
 import { requireFullHistory } from './repository.mjs';
 import { analyzeRetention, numstatEntries } from './retention.mjs';
 import { accountLinks as normalizeAccountLinks } from '../src/accounts.js';
@@ -99,7 +100,8 @@ export async function analyzeHistory({ repo, branch = "main", excludes = DEFAULT
   const progress = async event => { onProgress(event); await new Promise(resolve => setImmediate(resolve)); };
   await progress({ stage: "history" });
   requireFullHistory(repo);
-  new Intl.DateTimeFormat("zh-CN", { timeZone }).format(0);
+  try { new Intl.DateTimeFormat('zh-CN', { timeZone }).format(0); }
+  catch { throw new AppError('error.timeZone'); }
   duration = Math.min(180, Math.max(15, Number(duration) || 60));
   maxAuthors = Math.min(32, Math.max(1, Math.floor(Number(maxAuthors) || 16)));
   const head = git(repo, ["rev-parse", `${branch}^{commit}`]);
