@@ -1,3 +1,5 @@
+中文 | [English](README_EN.md)
+
 # Git History Visualizer
 
 把 Git 提交历史变成贡献动效，支持本地交互预览和 1080p MP4 导出。
@@ -5,6 +7,8 @@
 ![DeepSeek Harness 提交历史可视化](docs/assets/dsh-demo.png)
 
 内置 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 示例：12,469 个非合并提交、68 个邮箱身份，播放 60 秒。外层球表示累计改动，内芯表示最终存留；末帧数字为“改动（存留）”。**改动量不等于贡献质量。**
+
+[观看 60 秒演示视频](https://github.com/WANGKenwill/git-history-visualizer/releases/download/v0.1.0/dsh-demo.mp4)
 
 ## 快速开始
 
@@ -16,7 +20,23 @@ cd git-history-visualizer
 npm run setup -- --start
 ```
 
-首次准备需要联网，会安装 npm 依赖及 Chromium。macOS 缺少 FFmpeg 时通过已有 Homebrew 安装；其他系统需自行安装 FFmpeg、ffprobe，Linux 还需准备 Chromium 系统库。已实测 macOS arm64。
+首次准备需要联网，会安装 npm 依赖及 Chromium。macOS 缺少 FFmpeg 时通过已有 Homebrew 安装；其他系统需自行安装 FFmpeg、ffprobe，Linux 还需准备 Chromium 系统库。平台验证：macOS arm64 已实测；Ubuntu 已通过 CI 安装和测试；Windows 尚未验证。
+
+<details>
+<summary>Ubuntu / Debian 依赖准备（进入源码目录后执行）</summary>
+
+预先安装 Node.js 22+，然后运行：
+
+```bash
+sudo apt-get update && sudo apt-get install -y git ffmpeg
+npm ci
+npx playwright install --with-deps chromium
+npm run studio
+```
+
+Chromium 系统依赖使用 [Playwright 官方安装方式](https://playwright.dev/docs/browsers#install-system-dependencies)。
+
+</details>
 
 以后启动只需：
 
@@ -28,9 +48,13 @@ npm run studio
 
 ## 使用
 
+界面目前为中文。
+
 1. 选择本地 Git 仓库，或填写远程 GitLab 地址并点击“读取分支”；私有仓库按需填写 Token。
 2. 选择分支、时长、时区和显示人数，点击“生成可视化”。默认显示 16 个作者，其余汇总为“其他”。
 3. 播放、拖动或全屏观看；点击作者球查看统计，点击“导出 MP4”保存视频。
+
+生成时显示分析阶段和最终存留的文件进度，命中存留缓存时直接复用。同一时间只执行一个分析任务。下载、更新或补全远程历史超过 5 分钟会提示重试；失败不会替换上次可视化结果。
 
 同名不同邮箱默认独立，可在账号关联中手动合并后重新生成。密集提交的粒子可能短暂遮挡文字，可暂停或拖动查看。
 
@@ -74,6 +98,7 @@ npm run render -- .cache/current/manifest.json exports/history.mp4
 - 小修复直接提交 PR，较大功能先开 Issue；问题报告请附环境、复现步骤和预期结果，优先使用合成仓库。
 - 统计或时间轴改动补回归测试；预览与导出保持一致。导出改动额外验证短视频解码、时长及末帧累计量。
 - 依赖变化后更新许可证声明。提交信息用中文，PR 说明验证结果，视觉改动附截图；勿提交缓存、私有历史、凭据或本机路径。
+- 使用或行为变化时同步更新中英文 README。
 
 安全漏洞请发送至 [kenwillwang@gmail.com](mailto:kenwillwang@gmail.com)，请勿在公开 Issue 中附上 Token、私有仓库数据或可利用的漏洞细节。
 

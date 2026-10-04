@@ -97,7 +97,16 @@ async function readBranches(body) {
   return { branches, defaultBranch: branches.includes(defaultBranch) ? defaultBranch : branches[0], ...(shallow === undefined ? {} : { shallow }) };
 }
 
-function cloneRepository(source, token, branch) {
+function download(args, env) {
+  return new Promise((done, reject) => {
+    execFile("git", args, { env, encoding: "utf8", timeout: 300_000, maxBuffer: 4 * 1024 * 1024 }, error => {
+      if (error) return reject(new Error(error.killed ? "下载历史超时（5 分钟），请检查网络后重新生成；也可先手动克隆，再选择本地仓库" : "下载历史失败，请检查 URL、分支、Token 和网络后重新生成"));
+      done();
+    });
+  });
+}
+
+async function cloneRepository(source, token, branch) {
   const key = createHash("sha256").update(`${source}\0${token ? "token" : "public"}`).digest("hex").slice(0, 16);
   const target = join(cacheDir, key);
   const { env, authArgs } = gitAuthentication(token);
@@ -106,11 +115,13 @@ function cloneRepository(source, token, branch) {
   if (info) {
     requireFullHistory(target);
     const ref = info.bare ? `refs/heads/${branch}` : `refs/remotes/origin/${branch}`;
-    execFileSync("git", [...authArgs, "-C", target, "fetch", "--no-tags", "origin", `+refs/heads/${branch}:${ref}`], { stdio: "pipe", env });
+    await download([ ...authArgs, "-C", target, "fetch", "--no-tags", "origin", `+refs/heads/${branch}:${ref}` ], env);
     return target;
   }
   try { rmSync(target, { recursive: true, force: true }); } catch {}
-  execFileSync("git", [...authArgs, "clone", "--bare", "--no-tags", "--single-branch", "--branch", branch, source, target], { stdio: "pipe", maxBuffer: 4 * 1024 * 1024, env });
+  try {
+    await download([...authArgs, "clone", "--bare", "--no-tags", "--single-branch", "--branch", branch, source, target], env);
+  } catch (error) { rmSync(target, { recursive: true, force: true }); throw error; }
   return target;
 }
 
@@ -125,8 +136,8 @@ async function completeHistory(body) {
   try {
     const { env } = gitAuthentication();
     await new Promise((done, reject) => {
-      execFile("git", ["-C", repo, "fetch", "--unshallow"], { env, encoding: "utf8", maxBuffer: 4 * 1024 * 1024 }, error => {
-        if (error) return reject(new Error("补全历史失败，请检查网络、远程仓库和本机 Git 登录凭据，或在仓库中手动执行 git fetch --unshallow"));
+      execFile("git", ["-C", repo, "fetch", "--unshallow"], { env, encoding: "utf8", timeout: 300_000, maxBuffer: 4 * 1024 * 1024 }, error => {
+        if (error) return reject(new Error(error.killed ? "补全历史超时（5 分钟），请检查网络后重试，或手动执行 git fetch --unshallow" : "补全历史失败，请检查网络、远程仓库和本机 Git 登录凭据，或在仓库中手动执行 git fetch --unshallow"));
         done();
       });
     });
@@ -134,12 +145,14 @@ async function completeHistory(body) {
   } finally { completingHistory.delete(repo); }
 }
 
-async function analyze(body) {
+async function analyze(body, onProgress = () => {}) {
   const source = String(body.source || "").trim();
   if (!source) throw new Error("请输入 GitLab 仓库链接或本地 Git 路径");
   const branch = String(body.branch || "main");
   const remote = source.startsWith("http://") || source.startsWith("https://");
-  const repo = remote ? cloneRepository(source, body.token, branch) : localRepository(source);
+  onProgress({ stage: remote ? "download" : "repository" });
+  await new Promise(resolve => setImmediate(resolve));
+  const repo = remote ? await cloneRepository(source, body.token, branch) : localRepository(source);
   const info = requireFullHistory(repo);
   const resolvedBranch = resolveBranch(repo, remote && !info.bare ? `origin/${branch}` : branch);
   const duration = Math.min(180, Math.max(15, Number(body.duration) || 60));
@@ -148,7 +161,7 @@ async function analyze(body) {
   let previousManifest = null;
   try { previousManifest = JSON.parse(readFileSync(cachePath, "utf8")); } catch {}
   if (remote && [branch, `origin/${branch}`].includes(previousManifest?.project.branch)) previousManifest.project.branch = resolvedBranch;
-  const manifest = await analyzeHistory({ repo, branch: resolvedBranch, duration, projectName: basename(repo), previousManifest, timeZone: String(body.timeZone || "Asia/Shanghai"), maxAuthors: body.maxAuthors, accountLinks: body.accountLinks });
+  const manifest = await analyzeHistory({ repo, branch: resolvedBranch, duration, projectName: basename(repo), previousManifest, timeZone: String(body.timeZone || "Asia/Shanghai"), maxAuthors: body.maxAuthors, accountLinks: body.accountLinks, onProgress });
   manifest.project.source = source;
   writeFileSync(cachePath, `${JSON.stringify(manifest, null, 2)}\n`);
   writeFileSync(join(dataDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
@@ -160,7 +173,7 @@ function contentType(path) {
   return { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".json": "application/json; charset=utf-8" }[extname(path)] || "application/octet-stream";
 }
 
-let exporting = false;
+let exporting = false, analyzing = false;
 const server = createServer(async (request, response) => {
   try {
     const url = new URL(request.url, "http://localhost");
@@ -176,8 +189,28 @@ const server = createServer(async (request, response) => {
       return json(response, 200, { ok: true });
     }
     if (request.method === "POST" && url.pathname === "/api/analyze") {
-      const manifest = await analyze(await readBody(request));
-      return json(response, 200, { ok: true, manifest, analysis: manifest.analysis });
+      if (analyzing) return json(response, 409, { ok: false, error: "已有分析正在运行，请等待完成后重试" });
+      analyzing = true;
+      const streaming = request.headers.accept?.includes("application/x-ndjson");
+      const send = event => { if (!response.destroyed) response.write(`${JSON.stringify(event)}\n`); };
+      try {
+        const body = await readBody(request);
+        if (streaming) response.writeHead(200, { "content-type": "application/x-ndjson; charset=utf-8", "cache-control": "no-store" });
+        let lastStage, lastProgress = -Infinity;
+        const manifest = await analyze(body, event => {
+          if (!streaming) return;
+          const now = performance.now();
+          if (event.stage !== lastStage || event.completed === 0 || event.completed === event.total || event.cacheHit || now - lastProgress >= 250) {
+            send({ type: "progress", ...event }); lastStage = event.stage; lastProgress = now;
+          }
+        });
+        const result = { ok: true, manifest, analysis: manifest.analysis };
+        if (streaming) { send({ type: "complete", ...result }); return response.end(); }
+        return json(response, 200, result);
+      } catch (error) {
+        if (!response.headersSent) throw error;
+        send({ type: "error", error: error.message }); return response.end();
+      } finally { analyzing = false; }
     }
     if (request.method === "POST" && url.pathname === "/api/export") {
       if (exporting) return json(response, 409, { ok: false, error: "已有导出任务正在运行，请等待完成" });

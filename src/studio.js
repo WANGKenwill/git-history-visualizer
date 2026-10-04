@@ -167,6 +167,21 @@ async function handlePickLocal() {
     $("#status").textContent = `选择失败：${error.message}`;
   } finally { button.disabled = false; }
 }
+async function readEvents(response, consume) {
+  const reader = response.body.getReader(), decoder = new TextDecoder();
+  let pending = '';
+  const line = value => { if (value.trim()) consume(JSON.parse(value)); };
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      pending += done ? decoder.decode() : decoder.decode(value, { stream: true });
+      let boundary;
+      while ((boundary = pending.indexOf('\n')) !== -1) { line(pending.slice(0, boundary)); pending = pending.slice(boundary + 1); }
+      if (done) { line(pending); break; }
+    }
+  } finally { reader.releaseLock(); }
+}
+
 async function handleGenerate(event) {
   event.preventDefault();
   const remote = $("#remote-source").value.trim();
@@ -180,12 +195,22 @@ async function handleGenerate(event) {
   $("#status").textContent = "正在读取 Git 历史与最终存留归属…";
   try {
     const response = await fetch("/api/analyze", {
-      method: "POST", headers: { "content-type": "application/json" },
+      method: "POST", headers: { "content-type": "application/json", accept: "application/x-ndjson" },
       body: JSON.stringify({ source, token: remote ? $("#token").value : "", branch: $("#branch").value,
         duration: $("#duration").value, timeZone: $("#time-zone").value.trim(), maxAuthors: $("#max-authors").value,
         accountLinks: source === manifest.project.repo || source === loadedSource ? draftLinks : undefined }),
     });
-    const result = await response.json();
+    let result;
+    if (!response.headers.get('content-type')?.includes('application/x-ndjson')) result = await response.json();
+    else await readEvents(response, event => {
+      if (event.type === 'error') throw new Error(event.error);
+      if (event.type === 'complete') result = event;
+      if (event.type === 'progress') {
+        const labels = { repository: '检查本地仓库…', download: '下载或更新完整历史…', history: '读取提交历史…', changes: '统计新增与删除…', retention: '分析最终存留…', layout: '整理统计与画面布局…' };
+        $("#status").textContent = event.cacheHit ? '复用最终存留缓存…' : event.stage === 'retention' && Number.isInteger(event.completed) ? `分析最终存留：已处理 ${event.completed}/${event.total} 个文件` : labels[event.stage] || '正在分析…';
+      }
+    });
+    if (!result) throw new Error('分析连接中断，未收到完成结果，请重新生成');
     if (!result.ok) throw new Error(result.error);
     manifest = result.manifest;
     loadedSource = source;
@@ -222,25 +247,12 @@ async function handleExport() {
     if (!response.headers.get('content-type')?.includes('application/x-ndjson')) {
       const result = await response.json(); if (!result.ok) throw new Error(result.error); file = result.file;
     } else {
-      const reader = response.body.getReader(), decoder = new TextDecoder();
-      let pending = '';
-      const consume = line => {
-        if (!line.trim()) return;
-        const event = JSON.parse(line);
+      await readEvents(response, event => {
         if (event.type === 'start') $("#export-status").textContent = '准备导出…';
         else if (event.type === 'progress') $("#export-status").textContent = event.frame === event.total ? `画面已生成 ${event.frame}/${event.total} 帧（100%），正在完成编码…` : `正在导出 ${event.frame}/${event.total} 帧（${Math.floor(event.frame / event.total * 100)}%）`;
         else if (event.type === 'complete') file = event.file;
         else if (event.type === 'error') throw new Error(event.error);
-      };
-      try {
-        while (true) {
-          const { value, done } = await reader.read();
-          pending += done ? decoder.decode() : decoder.decode(value, { stream: true });
-          let boundary;
-          while ((boundary = pending.indexOf('\n')) !== -1) { const line = pending.slice(0, boundary); pending = pending.slice(boundary + 1); consume(line); }
-          if (done) { consume(pending); break; }
-        }
-      } finally { reader.releaseLock(); }
+      });
     }
     if (!file) throw new Error('导出连接中断，未收到完成结果，请重试');
     $("#export-status").innerHTML = `导出完成：<a href="${file}" download>下载 MP4</a>`;
