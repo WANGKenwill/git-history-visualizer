@@ -91,7 +91,7 @@ npm run studio
 
 ```bash
 npm run check       # 统计、界面及视频导出测试
-npm run licenses    # 更新第三方许可证声明
+npm run licenses    # 更新源码发布用的直接运行依赖声明
 ```
 
 导出按固定时间逐帧绘制，将原始 Canvas 像素通过本地连接交给 FFmpeg，省去 PNG 压缩、Base64 中转和 PNG 解码。浏览器通过内容安全策略限制资源与连接为同一来源，导出不访问外部网络。
@@ -113,3 +113,7 @@ npm run render -- .cache/current/manifest.json exports/history.mp4
 ## 许可
 
 [MIT License](LICENSE)，版权人 WANGKenwill。npm 依赖声明见 [第三方许可证](LICENSES_THIRD_PARTY.md)。Git、Chromium 和 FFmpeg 由用户独立安装，不随源码分发。
+
+第三方声明从本地安装包读取直接运行依赖的根目录许可原文；传递依赖及内嵌组件的完整声明由上游安装包提供。本文件适用于当前源码发布方式，不是包含依赖的安装包或容器的完整许可清单。
+
+内置示例数据由 DeepSeek Harness 的公开 Git 提交历史生成，不包含其源码。上游项目采用 [MIT License](https://github.com/deepseek-ai/deepseek-harness/blob/5badb15009ae1756c3afe0ae0cef1faafc290ccc/LICENSE)；示例来源及固定提交见上文。
