@@ -91,7 +91,7 @@ The bundled demo is pinned to DSH's `master` commit [`5badb150`](https://github.
 
 ```bash
 npm run check       # Statistics, UI, and video export tests
-npm run licenses    # Update third-party license notices
+npm run licenses    # Update direct runtime dependency notices for source releases
 ```
 
 Exports render each frame at a fixed timestamp and send raw Canvas pixels to FFmpeg over a local connection, avoiding PNG compression, Base64 transfer, and PNG decoding. Browser Content Security Policy restricts resources and connections to the same origin; export does not access external networks.
@@ -113,3 +113,7 @@ Report security vulnerabilities privately to [kenwillwang@gmail.com](mailto:kenw
 ## License
 
 [MIT License](LICENSE), copyright WANGKenwill. npm dependency notices are in [Third-party licenses](LICENSES_THIRD_PARTY.md). Git, Chromium, and FFmpeg are installed separately and are not distributed with this project's source.
+
+Third-party notices contain root-level license texts read from locally installed direct runtime dependencies. Upstream packages provide the full notices for transitive dependencies and bundled components. This file applies to the current source releases; it is not a complete license inventory for installers or containers that include dependencies.
+
+The bundled demo data is generated from DeepSeek Harness's public Git commit history and contains no source code from that project. The upstream project uses the [MIT License](https://github.com/deepseek-ai/deepseek-harness/blob/5badb15009ae1756c3afe0ae0cef1faafc290ccc/LICENSE); see above for the demo source and pinned commit.
